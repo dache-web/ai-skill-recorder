@@ -1,0 +1,33 @@
+:root { font-family: Inter, "Segoe UI", "Yu Gothic UI", sans-serif; color: #172525; background: #eef1eb; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: linear-gradient(90deg, rgba(23,37,37,.035) 1px, transparent 1px), linear-gradient(rgba(23,37,37,.035) 1px, transparent 1px), #eef1eb; background-size: 32px 32px; }
+button { font: inherit; }
+.shell { width: min(960px, calc(100% - 40px)); margin: 0 auto; padding: 56px 0 32px; }
+.hero { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 48px; }
+.eyebrow, .section-number { margin: 0 0 10px; color: #e05c3e; font-size: 12px; font-weight: 800; letter-spacing: .16em; }
+h1, h2, p { margin-top: 0; } h1 { margin-bottom: 8px; font-size: clamp(34px,6vw,58px); line-height: .95; letter-spacing: -.055em; } h2 { margin-bottom: 0; font-size: clamp(24px,4vw,34px); letter-spacing: -.035em; }
+.subtitle { margin-bottom: 0; color: #54615f; font-size: 17px; }
+.status-pill { display: flex; align-items: center; gap: 9px; padding: 10px 14px; border: 1px solid #bdc6bf; border-radius: 999px; background: rgba(255,255,255,.55); font-size: 13px; font-weight: 700; white-space: nowrap; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #7e8b87; }
+.status-recording { border-color: #edb0a2; color: #b93c21; background: #fff4f0; } .status-recording .status-dot { background: #e05c3e; box-shadow: 0 0 0 5px rgba(224,92,62,.14); animation: pulse 1.5s infinite; }
+.recorder-card, .preview-card { padding: clamp(24px,5vw,48px); border: 1px solid #cbd2cc; background: rgba(250,251,247,.94); box-shadow: 0 18px 55px rgba(31,48,45,.08); }
+.recorder-topline, .preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.timer { font-variant-numeric: tabular-nums; font-size: clamp(36px,8vw,72px); font-weight: 300; letter-spacing: -.05em; }
+.privacy-note { display: flex; gap: 12px; align-items: flex-start; margin: 36px 0 26px; padding: 16px 18px; border-left: 3px solid #f0b64d; background: #fff9e9; color: #4f544d; }
+.privacy-note span { color: #d99925; } .privacy-note p { margin: 0; line-height: 1.6; }
+.meter-row { display: flex; justify-content: space-between; align-items: center; gap: 24px; padding: 20px 0; border-top: 1px solid #dce1dc; border-bottom: 1px solid #dce1dc; }
+.mic-state { display: flex; align-items: center; gap: 14px; color: #7a8581; } .mic-state.active { color: #246e5a; }
+.mic-icon { width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid currentColor; border-radius: 50%; font-size: 8px; }
+.mic-state small { display: block; margin-bottom: 2px; font-size: 10px; letter-spacing: .13em; } .mic-state strong { font-size: 15px; }
+.limit-note { margin: 0; color: #6f7976; font-size: 13px; text-align: right; }
+.error-box { margin-top: 20px; padding: 14px 16px; border-left: 3px solid #c8452c; background: #fff0ec; color: #8f2e1b; line-height: 1.6; }
+.actions { display: flex; justify-content: center; margin-top: 34px; }
+.primary-button, .stop-button, .secondary-button { min-height: 52px; padding: 0 28px; border: 0; cursor: pointer; font-weight: 800; transition: transform .15s ease, background .15s ease; }
+.primary-button { color: white; background: #173f39; } .primary-button:hover { background: #20564d; transform: translateY(-1px); } .primary-button:disabled { opacity: .55; cursor: wait; transform: none; }
+.stop-button { display: flex; align-items: center; gap: 10px; color: white; background: #c9482d; } .stop-button span { width: 11px; height: 11px; background: white; }
+.secondary-button { border: 1px solid #173f39; color: #173f39; background: transparent; }
+.preview-card { margin-top: 28px; } .ready-label { color: #246e5a; font-size: 11px; font-weight: 800; letter-spacing: .14em; }
+.video-player { width: 100%; max-height: 520px; margin-top: 30px; background: #0d1413; } .preview-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 20px; }
+footer { display: flex; justify-content: space-between; gap: 20px; margin-top: 24px; color: #6d7774; font-size: 12px; } footer p { margin: 0; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 8px rgba(224,92,62,0); } }
+@media (max-width: 640px) { .shell { width: min(100% - 24px,960px); padding-top: 30px; } .hero, .meter-row, footer, .recorder-topline { align-items: flex-start; flex-direction: column; } .limit-note { text-align: left; } .preview-actions { flex-direction: column; } .preview-actions button { width: 100%; } }

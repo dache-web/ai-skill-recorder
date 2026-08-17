@@ -207,3 +207,18 @@
 - 結果: 解決 — 通信APIなし、公開パスとCSPを確認
 - 再発: なし
 - 次に試す別手法: コマンドを個別実行する
+
+### ERR-20260817-013: GitHub Pagesサイトが未有効
+
+- 発生日時: 2026-08-17（正確な時刻は未記録）
+- 発生した操作: GitHub ActionsからPages公開設定を取得
+- 環境: GitHub Actions / Publicリポジトリ
+- 分類: デプロイ設定
+- 同一エラー署名: github-pages-site-not-enabled
+- 試行回数: 1 / 2
+- エラー内容（秘密情報を除去済み）: Pagesサイトが未有効のため`configure-pages`がNot Foundで終了した
+- 原因: 確定 — リポジトリのPagesが未有効で、Actionの自動有効化も既定で無効だった
+- 対応方法: 明示承認済みのGitHub Pages公開を`enablement: true`で有効化する
+- 結果: 再確認中
+- 再発: 未確認
+- 次に試す別手法: GitHubのSettings → PagesからSourceをGitHub Actionsへ設定する

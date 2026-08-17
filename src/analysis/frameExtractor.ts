@@ -27,9 +27,11 @@ export const calculateFrameTimes = (
 
 const waitForEvent = (target: EventTarget, eventName: string): Promise<void> =>
   new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => { cleanup(); reject(new Error('動画の読み込みがタイムアウトしました。')) }, 15_000)
     const onSuccess = () => { cleanup(); resolve() }
     const onError = () => { cleanup(); reject(new Error('動画を読み込めませんでした。')) }
     const cleanup = () => {
+      window.clearTimeout(timeout)
       target.removeEventListener(eventName, onSuccess)
       target.removeEventListener('error', onError)
     }
@@ -57,6 +59,18 @@ const seek = async (video: HTMLVideoElement, timeSeconds: number): Promise<void>
 const resolveDuration = async (video: HTMLVideoElement, durationHint?: number): Promise<number> => {
   if (Number.isFinite(video.duration) && video.duration > 0) return video.duration
   if (durationHint && Number.isFinite(durationHint) && durationHint > 0) return durationHint
+  const durationChanged = waitForEvent(video, 'durationchange')
+  video.currentTime = Number.MAX_SAFE_INTEGER
+  try {
+    await durationChanged
+    if (Number.isFinite(video.duration) && video.duration > 0) {
+      const duration = video.duration
+      await seek(video, 0)
+      return duration
+    }
+  } catch {
+    // The caller receives the stable user-facing error below.
+  }
   throw new Error('録画時間を取得できませんでした。')
 }
 

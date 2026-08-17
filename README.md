@@ -1,6 +1,8 @@
 # AI Skill Recorder
 
-Windows版Chrome / Edgeで、PC画面とマイク音声を録画する第1工程の試作です。
+Windows版Chrome / Edgeで、PC画面とマイク音声を録画する第1工程完成版です。
+
+会社PCのChrome・Edgeによる最終受け入れテストは合格済みです。
 
 ## 会社PCでの公開テスト
 

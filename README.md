@@ -2,6 +2,14 @@
 
 Windows版Chrome / Edgeで、PC画面とマイク音声を録画する第1工程の試作です。
 
+## 会社PCでの公開テスト
+
+公開URL：<https://dache-web.github.io/ai-skill-recorder/>
+
+会社PCではNode.js、npm、pnpm、Git、VS Codeなどの開発ツールは不要です。Windows版ChromeまたはEdgeで公開URLを開くだけでテストできます。
+
+公開ページはGitHub PagesからHTML、CSS、JavaScriptを受信しますが、録画した画面・マイク音声・WebM・Blob・利用者ファイルをGitHubや外部サーバーへ送信しません。録画はブラウザのメモリ内だけで処理され、「PCへ保存」を押した場合だけ利用者のPCへ保存されます。
+
 ## 現在できること
 
 - ブラウザ標準の画面共有画面から、画面・ウィンドウ・タブを選択
@@ -27,6 +35,7 @@ pnpm dev
 ```bash
 pnpm test
 pnpm lint
+pnpm typecheck
 pnpm build
 ```
 
@@ -38,3 +47,10 @@ pnpm build
 - 録画ファイルをGitHubへ追加しないでください。
 - 実際の会社情報、顧客情報、パスワードをテスト録画へ含めないでください。
 - 第1工程では外部APIやクラウドを使用しません。
+- CSPの`connect-src 'none'`により、公開アプリからの外部通信をブラウザ側でも禁止します。
+
+## GitHub Pagesへの公開
+
+`main`へpushすると、GitHub Actionsが依存関係の固定インストール、自動テスト、ESLint、TypeScript型検査、Viteビルドを順番に実行します。すべて成功した場合だけ`dist`をGitHub Pagesへ公開します。
+
+公開を停止する場合は、GitHubのリポジトリ設定にあるPagesを無効にします。コードを公開対応前へ戻す場合は、checkpoint `44c2fdd`を基準に安全なrevertを行います。

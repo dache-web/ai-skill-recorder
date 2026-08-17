@@ -219,9 +219,9 @@
 - エラー内容（秘密情報を除去済み）: Pagesサイトが未有効のため`configure-pages`がNot Foundで終了した
 - 原因: 確定 — リポジトリのPagesが未有効で、Actionの自動有効化も既定で無効だった
 - 対応方法: 1回目はPagesの事前有効化なしで確認。2回目は明示承認済みのGitHub Pages公開を`enablement: true`で試行
-- 結果: WorkflowトークンにPagesサイト新規作成権限がなく未解決。別手法として、利用者がGitHub Settings → PagesでSourceをGitHub Actionsへ設定
+- 結果: 解決 — 利用者がGitHub Settings → PagesでSourceをGitHub Actionsへ設定後、再実行でbuild・deployとも成功
 - 再発: あり
-- 次に試す別手法: GitHubのSettings → PagesからSourceをGitHub Actionsへ設定する
+- 次に試す別手法: 不要
 
 ### ERR-20260817-014: GitHub連携からActionsを再実行できない
 
@@ -234,6 +234,6 @@
 - エラー内容（秘密情報を除去済み）: Actions再実行APIが403 Resource not accessible by integrationを返した
 - 原因: 確定 — GitHub連携にActions再実行権限がない
 - 対応方法: エラーログ更新コミットをpushし、新規のActions実行を開始する
-- 結果: 再確認中
-- 再発: 未確認
-- 次に試す別手法: GitHub Actions画面から利用者が再実行する
+- 結果: 解決 — ログ更新コミットのpushで新規実行を開始し、build・deployとも成功
+- 再発: なし
+- 次に試す別手法: 不要

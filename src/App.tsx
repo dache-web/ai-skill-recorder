@@ -1,11 +1,13 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createAnalysisPackage } from './analysis/analysisPackage'
 import { analysisJson, downloadBlob, downloadJson } from './analysis/export'
 import { FRAME_INTERVAL_OPTIONS } from './analysis/frameExtractor'
-import type { AnalysisResult, RecordingSource } from './analysis/types'
+import { captureReviewPoint, createSegment, MAX_POINT_COUNT, normalizeTime, overlappingSegmentIds, pointData } from './analysis/reviewAnnotations'
+import type { AnalysisResult, RecordingSource, ReviewPoint, ReviewSegment } from './analysis/types'
 import { formatElapsed, safeRecordingName, supportedMimeType, type RecorderStatus, userFacingCaptureError } from './recorder'
 
 const stopTracks = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop())
+const ordered = <T extends { order: number }>(items: T[]): T[] => items.map((item, index) => ({ ...item, order: index + 1 }))
 
 function App() {
   const [status, setStatus] = useState<RecorderStatus>('idle')
@@ -14,12 +16,18 @@ function App() {
   const [message, setMessage] = useState('録画データは外部へ送信されず、このブラウザ内だけで処理されます。')
   const [error, setError] = useState('')
   const [videoUrl, setVideoUrl] = useState('')
+  const [importedUrl, setImportedUrl] = useState('')
   const [recordingBlob, setRecordingBlob] = useState<Blob | null>(null)
   const [recordingName, setRecordingName] = useState('')
   const [recordedAt, setRecordedAt] = useState<string | null>(null)
   const [recordingHadAudio, setRecordingHadAudio] = useState(false)
   const [recordingDuration, setRecordingDuration] = useState(0)
   const [importedFile, setImportedFile] = useState<File | null>(null)
+  const [points, setPoints] = useState<ReviewPoint[]>([])
+  const [videoSegments, setVideoSegments] = useState<ReviewSegment[]>([])
+  const [excludedSegments, setExcludedSegments] = useState<ReviewSegment[]>([])
+  const [activeSegment, setActiveSegment] = useState<{ kind: 'video' | 'excluded'; startSeconds: number } | null>(null)
+  const [reviewMessage, setReviewMessage] = useState('')
   const [frameInterval, setFrameInterval] = useState(5)
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
   const [analysisBusy, setAnalysisBusy] = useState(false)
@@ -31,235 +39,208 @@ function App() {
   const startedAtRef = useRef(0)
   const isStoppingRef = useRef(false)
   const previewRef = useRef<HTMLVideoElement>(null)
+  const pointSequenceRef = useRef(0)
+  const videoSegmentSequenceRef = useRef(0)
+  const excludedSegmentSequenceRef = useRef(0)
+  const reviewUrl = importedUrl || videoUrl
+  const overlapIds = useMemo(() => overlappingSegmentIds(videoSegments, excludedSegments), [videoSegments, excludedSegments])
 
   useEffect(() => {
     if (status !== 'recording') return
     const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000)), 250)
     return () => window.clearInterval(timer)
   }, [status])
-
-  useEffect(() => () => {
-    stopTracks(displayStreamRef.current)
-    stopTracks(micStreamRef.current)
-    if (videoUrl) URL.revokeObjectURL(videoUrl)
-  }, [videoUrl])
-
-  useEffect(() => () => {
-    analysisResult?.frames.forEach((frame) => URL.revokeObjectURL(frame.previewUrl))
-  }, [analysisResult])
+  useEffect(() => () => { stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current) }, [])
+  useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
+  useEffect(() => () => { if (importedUrl) URL.revokeObjectURL(importedUrl) }, [importedUrl])
 
   const resetAnalysis = () => {
     analysisResult?.frames.forEach((frame) => URL.revokeObjectURL(frame.previewUrl))
-    setAnalysisResult(null)
-    setAnalysisMessage('')
+    setAnalysisResult(null); setAnalysisMessage('')
+  }
+  const clearReview = () => {
+    points.forEach((point) => URL.revokeObjectURL(point.previewUrl))
+    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setActiveSegment(null); setReviewMessage('')
+    pointSequenceRef.current = 0; videoSegmentSequenceRef.current = 0; excludedSegmentSequenceRef.current = 0
+    resetAnalysis()
   }
 
   const finishRecording = () => {
     if (isStoppingRef.current) return
-    isStoppingRef.current = true
-    setStatus('stopping')
-    setMessage('録画を終了しています…')
-    stopTracks(displayStreamRef.current)
-    stopTracks(micStreamRef.current)
+    isStoppingRef.current = true; setStatus('stopping'); setMessage('録画を終了しています…')
+    stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current)
     const recorder = recorderRef.current
     if (recorder && recorder.state !== 'inactive') recorder.stop()
-    else {
-      setStatus('idle')
-      isStoppingRef.current = false
-    }
+    else { setStatus('idle'); isStoppingRef.current = false }
   }
 
   const startRecording = async () => {
     if (!navigator.mediaDevices?.getDisplayMedia || !window.MediaRecorder) {
-      setError('このブラウザでは録画機能を利用できません。Windows版ChromeまたはEdgeの最新版を使用してください。')
-      return
+      setError('このブラウザでは録画機能を利用できません。Windows版ChromeまたはEdgeの最新版を使用してください。'); return
     }
-    setError('')
-    setMessage('共有する画面を選んでください。')
-    setRecordingBlob(null)
-    setRecordingName('')
-    setRecordedAt(null)
-    setRecordingHadAudio(false)
-    setRecordingDuration(0)
-    setImportedFile(null)
-    resetAnalysis()
-    if (videoUrl) { URL.revokeObjectURL(videoUrl); setVideoUrl('') }
-    setStatus('requesting')
-    setElapsed(0)
-    isStoppingRef.current = false
-    chunksRef.current = []
-
+    setError(''); setMessage('共有する画面を選んでください。'); setRecordingBlob(null); setRecordingName(''); setRecordedAt(null)
+    setRecordingHadAudio(false); setRecordingDuration(0); setImportedFile(null); setImportedUrl(''); clearReview(); setVideoUrl('')
+    setStatus('requesting'); setElapsed(0); isStoppingRef.current = false; chunksRef.current = []
     try {
       const displayStream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 30 } }, audio: false })
       displayStreamRef.current = displayStream
       let micStream: MediaStream | null = null
-      try {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false,
-        })
-      } catch {
-        setMessage('マイクを取得できなかったため、画面だけを録画しています。')
-      }
-      micStreamRef.current = micStream
-      setMicActive(Boolean(micStream?.getAudioTracks().length))
+      try { micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false }) }
+      catch { setMessage('マイクを取得できなかったため、画面だけを録画しています。') }
+      micStreamRef.current = micStream; setMicActive(Boolean(micStream?.getAudioTracks().length))
       const recordingStream = new MediaStream([...displayStream.getVideoTracks(), ...(micStream?.getAudioTracks() ?? [])])
-      const mimeType = supportedMimeType()
-      const recorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined)
+      const mimeType = supportedMimeType(); const recorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined)
       recorderRef.current = recorder
       recorder.addEventListener('dataavailable', (event) => { if (event.data.size > 0) chunksRef.current.push(event.data) })
-      recorder.addEventListener('error', () => {
-        setError('録画中にエラーが発生しました。録画を停止し、もう一度お試しください。')
-        finishRecording()
-      })
+      recorder.addEventListener('error', () => { setError('録画中にエラーが発生しました。録画を停止し、もう一度お試しください。'); finishRecording() })
       recorder.addEventListener('stop', () => {
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' })
-        stopTracks(recordingStream)
-        setMicActive(false)
-        if (blob.size === 0) {
-          setError('録画データが作成されませんでした。もう一度録画してください。')
-          setStatus('idle')
-        } else {
-          setRecordingDuration(Math.max(0.001, (Date.now() - startedAtRef.current) / 1000))
-          const url = URL.createObjectURL(blob)
-          setRecordingBlob(blob)
-          setVideoUrl(url)
-          setStatus('preview')
-          setMessage('録画が完了しました。再生してから、必要に応じてPCへ保存してください。')
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'video/webm' }); stopTracks(recordingStream); setMicActive(false)
+        if (blob.size === 0) { setError('録画データが作成されませんでした。もう一度録画してください。'); setStatus('idle') }
+        else {
+          setRecordingDuration(Math.max(0.001, (Date.now() - startedAtRef.current) / 1000)); setRecordingBlob(blob)
+          setVideoUrl(URL.createObjectURL(blob)); setStatus('preview'); setMessage('録画が完了しました。原本を保存し、重要な場面を確認できます。')
         }
         isStoppingRef.current = false
       })
       displayStream.getVideoTracks()[0]?.addEventListener('ended', finishRecording, { once: true })
-      startedAtRef.current = Date.now()
-      setRecordedAt(new Date(startedAtRef.current).toISOString())
-      setRecordingName(safeRecordingName(new Date(startedAtRef.current)))
-      setRecordingHadAudio(Boolean(micStream?.getAudioTracks().length))
-      recorder.start(1000)
-      setStatus('recording')
-      if (micStream) setMessage('画面とマイクを録画しています。')
+      startedAtRef.current = Date.now(); setRecordedAt(new Date(startedAtRef.current).toISOString())
+      setRecordingName(safeRecordingName(new Date(startedAtRef.current))); setRecordingHadAudio(Boolean(micStream?.getAudioTracks().length))
+      recorder.start(1000); setStatus('recording'); if (micStream) setMessage('画面とマイクを録画しています。')
     } catch (captureError) {
-      stopTracks(displayStreamRef.current)
-      stopTracks(micStreamRef.current)
-      displayStreamRef.current = null
-      micStreamRef.current = null
-      setMicActive(false)
-      setStatus('idle')
-      setError(userFacingCaptureError(captureError))
-      setMessage('録画は開始されていません。')
+      stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current); displayStreamRef.current = null; micStreamRef.current = null
+      setMicActive(false); setStatus('idle'); setError(userFacingCaptureError(captureError)); setMessage('録画は開始されていません。')
     }
   }
 
+  const selectedAnalysisSource = (): RecordingSource | null => {
+    if (importedFile) return { blob: importedFile, fileName: importedFile.name, source: 'saved-webm', recordedAt: null, hasAudio: 'unknown' }
+    if (!recordingBlob) return null
+    return { blob: recordingBlob, fileName: recordingName || safeRecordingName(), source: 'current-recording', recordedAt, hasAudio: recordingHadAudio, durationHintSeconds: recordingDuration }
+  }
+  const saveOriginalWebM = () => { const source = selectedAnalysisSource(); if (source) downloadBlob(source.blob, source.fileName) }
   const saveRecording = async () => {
     if (!recordingBlob) return
-    setError('')
-    const fileName = recordingName || safeRecordingName()
+    setError(''); const fileName = recordingName || safeRecordingName()
     try {
       if (window.showSaveFilePicker) {
         const handle = await window.showSaveFilePicker({ suggestedName: fileName, types: [{ description: 'WebM動画', accept: { 'video/webm': ['.webm'] } }] })
-        const writable = await handle.createWritable()
-        await writable.write(recordingBlob)
-        await writable.close()
-      } else {
-        const link = document.createElement('a')
-        link.href = videoUrl
-        link.download = fileName
-        link.click()
-      }
-      setMessage('録画をPCへ保存しました。録画ファイルをGitHubへ追加しないでください。')
+        const writable = await handle.createWritable(); await writable.write(recordingBlob); await writable.close()
+      } else downloadBlob(recordingBlob, fileName)
+      setMessage('元WebMをPCへ保存しました。原本は編集されていません。')
     } catch (saveError) {
-      if (saveError instanceof DOMException && saveError.name === 'AbortError') {
-        setMessage('保存をキャンセルしました。録画はこの画面に残っているため、もう一度保存できます。')
-        return
-      }
+      if (saveError instanceof DOMException && saveError.name === 'AbortError') { setMessage('保存をキャンセルしました。元WebMはこの画面に残っています。'); return }
       setError('録画を保存できませんでした。保存先の空き容量や書き込み権限を確認してください。')
     }
   }
 
-  const restartPreview = async () => {
-    if (!previewRef.current) return
-    previewRef.current.currentTime = 0
-    await previewRef.current.play()
+  const currentVideoTime = (): number | null => {
+    const video = previewRef.current
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) { setReviewMessage('動画の読み込み完了後に操作してください。'); return null }
+    return normalizeTime(video.currentTime, video.duration)
   }
-
-  const selectedAnalysisSource = (): RecordingSource | null => {
-    if (importedFile) {
-      return { blob: importedFile, fileName: importedFile.name, source: 'saved-webm', recordedAt: null, hasAudio: 'unknown' }
-    }
-    if (!recordingBlob) return null
-    return {
-      blob: recordingBlob,
-      fileName: recordingName || safeRecordingName(),
-      source: 'current-recording',
-      recordedAt,
-      hasAudio: recordingHadAudio,
-      durationHintSeconds: recordingDuration,
-    }
-  }
-
-  const prepareAnalysis = async () => {
-    const source = selectedAnalysisSource()
-    if (!source) return
-    resetAnalysis()
-    setAnalysisBusy(true)
-    setAnalysisMessage('ブラウザ内で録画情報と静止画を生成しています…')
+  const addPoint = async () => {
+    const video = previewRef.current; if (!video) return
+    if (points.length >= MAX_POINT_COUNT) { setReviewMessage(`ポイントは最大${MAX_POINT_COUNT}件です。不要なポイントを削除してから追加してください。`); return }
     try {
-      const result = await createAnalysisPackage(source, frameInterval)
-      setAnalysisResult(result)
-      setAnalysisMessage(`解析準備が完了しました。元WebM、JSON、PNG ${result.frames.length}枚を確認・保存できます。`)
-    } catch (analysisError) {
-      setAnalysisMessage(analysisError instanceof Error ? analysisError.message : '解析準備に失敗しました。')
-    } finally {
-      setAnalysisBusy(false)
-    }
+      const point = await captureReviewPoint(video, ++pointSequenceRef.current); setPoints((current) => ordered([...current, point])); resetAnalysis()
+      setReviewMessage(`${point.timeLabel}をポイントに追加しました。動画の再生位置は変更していません。`)
+    } catch (pointError) { setReviewMessage(pointError instanceof Error ? pointError.message : 'ポイントを追加できませんでした。') }
+  }
+  const replacePoint = async (id: string) => {
+    const video = previewRef.current; if (!video) return
+    try {
+      const replacement = await captureReviewPoint(video, ++pointSequenceRef.current)
+      setPoints((current) => current.map((point) => {
+        if (point.id !== id) return point
+        URL.revokeObjectURL(point.previewUrl); return { ...replacement, id: point.id, order: point.order }
+      }))
+      resetAnalysis(); setReviewMessage(`${replacement.timeLabel}へポイント位置と画像を変更しました。`)
+    } catch (pointError) { setReviewMessage(pointError instanceof Error ? pointError.message : 'ポイントを変更できませんでした。') }
+  }
+  const deletePoint = (id: string) => {
+    setPoints((current) => ordered(current.filter((point) => { if (point.id === id) URL.revokeObjectURL(point.previewUrl); return point.id !== id })))
+    resetAnalysis(); setReviewMessage('ポイントを削除しました。元WebMは変更されていません。')
   }
 
+  const toggleSegment = (kind: 'video' | 'excluded') => {
+    const time = currentVideoTime(); if (time === null) return
+    if (!activeSegment) { setActiveSegment({ kind, startSeconds: time }); setReviewMessage(`${kind === 'video' ? '動画区間' : '不要区間'}の開始位置を${formatElapsed(Math.floor(time))}に設定しました。`); return }
+    if (activeSegment.kind !== kind) { setReviewMessage('先に開始中の区間を終了またはキャンセルしてください。'); return }
+    try {
+      if (kind === 'video') {
+        const sequence = ++videoSegmentSequenceRef.current
+        setVideoSegments((current) => [...current, createSegment(`video-segment-${sequence}`, current.length + 1, activeSegment.startSeconds, time)])
+      } else {
+        const sequence = ++excludedSegmentSequenceRef.current
+        setExcludedSegments((current) => [...current, createSegment(`excluded-segment-${sequence}`, current.length + 1, activeSegment.startSeconds, time)])
+      }
+      setActiveSegment(null); resetAnalysis(); setReviewMessage(`${kind === 'video' ? '動画区間' : '不要区間'}を追加しました。`)
+    } catch (segmentError) { setReviewMessage(segmentError instanceof Error ? segmentError.message : '区間を追加できませんでした。') }
+  }
+  const changeSegmentBoundary = (kind: 'video' | 'excluded', id: string, boundary: 'start' | 'end') => {
+    const time = currentVideoTime(); if (time === null) return
+    const setter = kind === 'video' ? setVideoSegments : setExcludedSegments
+    const target = (kind === 'video' ? videoSegments : excludedSegments).find((segment) => segment.id === id)
+    if (!target) return
+    try {
+      const replacement = createSegment(target.id, target.order, boundary === 'start' ? time : target.startSeconds, boundary === 'end' ? time : target.endSeconds)
+      setter((current) => current.map((segment) => segment.id === id ? replacement : segment))
+      resetAnalysis(); setReviewMessage(`${boundary === 'start' ? '開始' : '終了'}位置を変更しました。`)
+    } catch (segmentError) { setReviewMessage(segmentError instanceof Error ? segmentError.message : '区間を変更できませんでした。') }
+  }
+  const deleteSegment = (kind: 'video' | 'excluded', id: string) => {
+    if (kind === 'video') setVideoSegments((current) => ordered(current.filter((segment) => segment.id !== id)))
+    else setExcludedSegments((current) => ordered(current.filter((segment) => segment.id !== id)))
+    resetAnalysis(); setReviewMessage('区間指定を削除しました。元WebMは変更されていません。')
+  }
+  const confirmSegment = async (segment: ReviewSegment) => {
+    if (!previewRef.current) return
+    previewRef.current.currentTime = segment.startSeconds
+    try { await previewRef.current.play() } catch { setReviewMessage('開始位置へ移動しました。再生ボタンを押して確認してください。') }
+  }
+
+  const reviewAnnotations = () => ({
+    maximumPoints: MAX_POINT_COUNT, points: points.map(pointData), videoSegments,
+    excludedSegments: excludedSegments.map((segment) => ({ ...segment, treatment: 'exclude-candidate' as const })),
+  })
+  const prepareAnalysis = async () => {
+    const source = selectedAnalysisSource(); if (!source) return
+    resetAnalysis(); setAnalysisBusy(true); setAnalysisMessage('ブラウザ内で解析JSONとAI解析用の補助画像を生成しています…')
+    try {
+      const result = await createAnalysisPackage(source, frameInterval, reviewAnnotations()); setAnalysisResult(result)
+      setAnalysisMessage(`解析準備が完了しました。ポイント${points.length}件、動画区間${videoSegments.length}件、不要区間${excludedSegments.length}件、補助PNG ${result.frames.length}枚です。`)
+    } catch (analysisError) { setAnalysisMessage(analysisError instanceof Error ? analysisError.message : '解析準備に失敗しました。') }
+    finally { setAnalysisBusy(false) }
+  }
   const copyAnalysisJson = async () => {
     if (!analysisResult) return
-    try {
-      await navigator.clipboard.writeText(analysisJson(analysisResult.document))
-      setAnalysisMessage('解析用JSONをクリップボードへコピーしました。')
-    } catch {
-      setAnalysisMessage('JSONをコピーできませんでした。「JSONを保存」を使用してください。')
-    }
+    try { await navigator.clipboard.writeText(analysisJson(analysisResult.document)); setAnalysisMessage('解析用JSONをクリップボードへコピーしました。') }
+    catch { setAnalysisMessage('JSONをコピーできませんでした。「JSONを保存」を使用してください。') }
   }
+  const importWebM = (file: File | null) => { setImportedFile(file); setImportedUrl(file ? URL.createObjectURL(file) : ''); clearReview() }
 
-  const saveOriginalWebM = () => {
-    const source = selectedAnalysisSource()
-    if (source) downloadBlob(source.blob, source.fileName)
-  }
-
+  const segmentList = (kind: 'video' | 'excluded', segments: ReviewSegment[]) => (
+    <div className="segment-list">
+      {segments.length === 0 && <p className="empty-state">まだ指定されていません。</p>}
+      {segments.map((segment) => <article className={`segment-item ${overlapIds.has(segment.id) ? 'has-overlap' : ''}`} key={segment.id}>
+        <div><strong>{kind === 'video' ? `区間${segment.order}` : `不要${segment.order}`}</strong><span>{formatElapsed(Math.floor(segment.startSeconds))} → {formatElapsed(Math.floor(segment.endSeconds))}（{segment.durationSeconds}秒）</span></div>
+        {overlapIds.has(segment.id) && <p className="overlap-warning">指定が重複しています。情報は両方とも保持されます。</p>}
+        <div className="item-actions"><button type="button" onClick={() => confirmSegment(segment)}>確認</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'start')}>開始変更</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'end')}>終了変更</button><button className="danger-link" type="button" onClick={() => deleteSegment(kind, segment.id)}>削除</button></div>
+      </article>)}
+    </div>
+  )
   const isBusy = status === 'requesting' || status === 'stopping'
+
   return (
     <main className="shell">
-      <header className="hero">
-        <div><p className="eyebrow">RECORDING PROTOTYPE · STEP 1</p><h1>AIスキルレコーダー</h1><p className="subtitle">画面と声を、そのまま業務の記録へ。</p></div>
-        <div className={`status-pill status-${status}`} aria-live="polite"><span className="status-dot" />{status === 'recording' ? '録画中' : status === 'requesting' ? '許可待ち' : status === 'stopping' ? '終了処理中' : '待機中'}</div>
-      </header>
-      <section className="recorder-card" aria-labelledby="recorder-title">
-        <div className="recorder-topline"><div><p className="section-number">01</p><h2 id="recorder-title">画面録画テスト</h2></div><div className="timer" aria-label={`録画経過時間 ${formatElapsed(elapsed)}`}>{formatElapsed(elapsed)}</div></div>
-        <div className="privacy-note"><span aria-hidden="true">◆</span><p>{message}</p></div>
-        <div className="meter-row"><div className={`mic-state ${micActive ? 'active' : ''}`}><span className="mic-icon" aria-hidden="true">●</span><div><small>MICROPHONE</small><strong>{micActive ? 'マイク取得中' : 'マイクなし'}</strong></div></div><p className="limit-note">最初のテストは5分以内で行ってください</p></div>
-        {error && <div className="error-box" role="alert">{error}</div>}
-        <div className="actions">{status !== 'recording' && <button className="primary-button" type="button" onClick={startRecording} disabled={isBusy}>{status === 'requesting' ? '画面を選択中…' : '録画開始'}</button>}{status === 'recording' && <button className="stop-button" type="button" onClick={finishRecording}><span aria-hidden="true" /> 録画停止</button>}</div>
-      </section>
-      {videoUrl && <section className="preview-card" aria-labelledby="preview-title"><div className="preview-heading"><div><p className="section-number">02</p><h2 id="preview-title">録画を確認</h2></div><span className="ready-label">READY TO REVIEW</span></div><video ref={previewRef} className="video-player" src={videoUrl} controls playsInline /><div className="preview-actions"><button className="secondary-button" type="button" onClick={restartPreview}>最初から再生</button><button className="primary-button" type="button" onClick={saveRecording}>PCへ保存</button></div></section>}
-      <section className="analysis-card" aria-labelledby="analysis-title">
-        <div className="preview-heading"><div><p className="section-number">03</p><h2 id="analysis-title">解析準備</h2></div><span className="ready-label">STEP 2-1</span></div>
-        <p className="analysis-lead">元WebM・解析用JSON・時刻付きPNGをブラウザ内で生成します。外部へ自動送信しません。</p>
-        <label className="file-field">保存済みWebMを読み込む（任意）<input type="file" accept="video/webm,.webm" onChange={(event) => { resetAnalysis(); setImportedFile(event.target.files?.[0] ?? null) }} /></label>
-        <div className="analysis-settings">
-          <label>静止画の間隔<select value={frameInterval} onChange={(event) => { resetAnalysis(); setFrameInterval(Number(event.target.value)) }}>{FRAME_INTERVAL_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{seconds}秒</option>)}</select></label>
-          <p>最大30枚。超える場合は間隔を自動調整します。</p>
-        </div>
-        <button className="primary-button" type="button" onClick={prepareAnalysis} disabled={analysisBusy || (!recordingBlob && !importedFile)}>{analysisBusy ? '解析準備中…' : '解析準備を開始'}</button>
-        {!recordingBlob && !importedFile && <p className="analysis-hint">録画を完了するか、保存済みWebMを選択してください。</p>}
-        {analysisMessage && <div className="privacy-note" aria-live="polite"><span aria-hidden="true">◆</span><p>{analysisMessage}</p></div>}
-        {analysisResult && <div className="analysis-result">
-          <div className="analysis-summary"><h3>解析データ</h3><dl><div><dt>元WebM</dt><dd>{analysisResult.document.recording.fileName}</dd></div><div><dt>録画時間</dt><dd>{analysisResult.document.recording.durationSeconds}秒</dd></div><div><dt>解像度</dt><dd>{analysisResult.document.recording.width} × {analysisResult.document.recording.height}</dd></div><div><dt>音声</dt><dd>{String(analysisResult.document.recording.hasAudio)}</dd></div><div><dt>PNG</dt><dd>{analysisResult.frames.length}枚</dd></div></dl></div>
-          <div className="preview-actions"><button className="secondary-button" type="button" onClick={saveOriginalWebM}>元WebMを保存</button><button className="secondary-button" type="button" onClick={copyAnalysisJson}>JSONをコピー</button><button className="primary-button" type="button" onClick={() => downloadJson(analysisResult.document)}>JSONを保存</button></div>
-          <details><summary>解析用JSONを確認</summary><pre className="json-preview">{analysisJson(analysisResult.document)}</pre></details>
-          <div className="frame-grid">{analysisResult.frames.map((frame) => <figure key={frame.fileName}><img src={frame.previewUrl} alt={`${frame.timeLabel}時点の録画画面`} /><figcaption><span>{frame.timeLabel}</span><button type="button" onClick={() => downloadBlob(frame.blob, frame.fileName)}>PNGを保存</button></figcaption></figure>)}</div>
-        </div>}
-      </section>
+      <header className="hero"><div><p className="eyebrow">RECORDING PROTOTYPE · STEP 2-1</p><h1>AIスキルレコーダー</h1><p className="subtitle">画面と声を、そのまま業務の記録へ。</p></div><div className={`status-pill status-${status}`} aria-live="polite"><span className="status-dot" />{status === 'recording' ? '録画中' : status === 'requesting' ? '許可待ち' : status === 'stopping' ? '終了処理中' : '待機中'}</div></header>
+      <section className="recorder-card" aria-labelledby="recorder-title"><div className="recorder-topline"><div><p className="section-number">01</p><h2 id="recorder-title">画面を録画</h2></div><div className="timer" aria-label={`録画経過時間 ${formatElapsed(elapsed)}`}>{formatElapsed(elapsed)}</div></div><div className="privacy-note"><span aria-hidden="true">◆</span><p>{message}</p></div><div className="meter-row"><div className={`mic-state ${micActive ? 'active' : ''}`}><span className="mic-icon" aria-hidden="true">●</span><div><small>MICROPHONE</small><strong>{micActive ? 'マイク取得中' : 'マイクなし'}</strong></div></div><p className="limit-note">録画中は普段どおり作業してください</p></div>{error && <div className="error-box" role="alert">{error}</div>}<div className="actions">{status !== 'recording' && <button className="primary-button" type="button" onClick={startRecording} disabled={isBusy}>{status === 'requesting' ? '画面を選択中…' : '録画開始'}</button>}{status === 'recording' && <button className="stop-button" type="button" onClick={finishRecording}><span aria-hidden="true" /> 録画停止</button>}</div></section>
+
+      <section className="source-card" aria-labelledby="source-title"><div className="preview-heading"><div><p className="section-number">02</p><h2 id="source-title">元動画を用意</h2></div><span className="ready-label">ORIGINAL WEBM</span></div><p className="analysis-lead">録画直後の動画、または保存済みWebMを使用できます。原本は編集・上書き・再エンコードされません。</p><label className="file-field">保存済みWebMを読み込む（任意）<input type="file" accept="video/webm,.webm" onChange={(event) => importWebM(event.target.files?.[0] ?? null)} /></label>{recordingBlob && !importedFile && <div className="preview-actions"><button className="primary-button" type="button" onClick={saveRecording}>元WebMをPCへ保存</button></div>}{importedFile && <p className="analysis-hint">読み込み中の原本: {importedFile.name}</p>}</section>
+
+      {reviewUrl && <section className="review-card" aria-labelledby="review-title"><div className="preview-heading"><div><p className="section-number">03</p><h2 id="review-title">重要な場面を確認</h2></div><span className="ready-label">REVIEW</span></div><p className="analysis-lead">動画を見ながら「重要」「動画で残す」「不要」の指定だけを追加します。元WebMは変更されません。</p><video ref={previewRef} className="video-player" src={reviewUrl} controls playsInline /><div className="review-controls"><button className="point-button" type="button" onClick={addPoint}>★ この場面をポイント追加</button><div className="segment-controls"><button type="button" className={activeSegment?.kind === 'video' ? 'active-control' : ''} onClick={() => toggleSegment('video')} disabled={Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : '動画区間 開始'}</button><button type="button" className={activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''} onClick={() => toggleSegment('excluded')} disabled={Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : '不要区間 開始'}</button></div>{activeSegment && <button className="cancel-link" type="button" onClick={() => { setActiveSegment(null); setReviewMessage('区間指定をキャンセルしました。') }}>区間指定をキャンセル</button>}</div>{reviewMessage && <div className="review-message" aria-live="polite">{reviewMessage}</div>}<div className="review-results"><section><div className="result-heading"><h3>重要ポイント</h3><span>{points.length} / {MAX_POINT_COUNT}</span></div>{points.length === 0 && <p className="empty-state">まだポイントはありません。</p>}<div className="point-grid">{points.map((point) => <article className="point-item" key={point.id}><img src={point.previewUrl} alt={`${point.timeLabel}のポイント画面`} /><div><strong>★{point.order}</strong><span>{point.timeLabel}（{point.timeSeconds}秒）</span></div><div className="item-actions"><button type="button" onClick={() => { if (previewRef.current) previewRef.current.currentTime = point.timeSeconds }}>確認</button><button type="button" onClick={() => replacePoint(point.id)}>現在位置へ変更</button><button className="danger-link" type="button" onClick={() => deletePoint(point.id)}>削除</button><button type="button" onClick={() => downloadBlob(point.blob, point.imageFileName)}>PNG保存</button></div></article>)}</div></section><section><h3>動画区間</h3>{segmentList('video', videoSegments)}</section><section><h3>不要区間</h3>{segmentList('excluded', excludedSegments)}</section></div></section>}
+
+      <section className="analysis-card" aria-labelledby="analysis-title"><div className="preview-heading"><div><p className="section-number">04</p><h2 id="analysis-title">解析データを作成</h2></div><span className="ready-label">STEP 2-1</span></div><p className="analysis-lead">指定情報をJSONにまとめ、AI解析用の補助画像を一定間隔で生成します。すべてブラウザ内で処理します。</p><div className="analysis-settings"><label>補助画像の間隔<select value={frameInterval} onChange={(event) => { resetAnalysis(); setFrameInterval(Number(event.target.value)) }}>{FRAME_INTERVAL_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{seconds}秒</option>)}</select></label><p>補助画像は最大30枚。★ポイントPNGが主データです。</p></div><button className="primary-button" type="button" onClick={prepareAnalysis} disabled={analysisBusy || !reviewUrl}>{analysisBusy ? '解析データ作成中…' : '解析データを作成'}</button>{!reviewUrl && <p className="analysis-hint">録画を完了するか、保存済みWebMを選択してください。</p>}{analysisMessage && <div className="privacy-note" aria-live="polite"><span aria-hidden="true">◆</span><p>{analysisMessage}</p></div>}{analysisResult && <div className="analysis-result"><div className="analysis-summary"><h3>解析データ</h3><dl><div><dt>元WebM</dt><dd>{analysisResult.document.recording.fileName}</dd></div><div><dt>原本</dt><dd>変更なし</dd></div><div><dt>ポイント</dt><dd>{points.length}件</dd></div><div><dt>動画区間</dt><dd>{videoSegments.length}件</dd></div><div><dt>不要区間</dt><dd>{excludedSegments.length}件</dd></div><div><dt>補助PNG</dt><dd>{analysisResult.frames.length}枚</dd></div></dl></div><div className="preview-actions"><button className="secondary-button" type="button" onClick={saveOriginalWebM}>元WebMを保存</button><button className="secondary-button" type="button" onClick={copyAnalysisJson}>JSONをコピー</button><button className="primary-button" type="button" onClick={() => downloadJson(analysisResult.document)}>JSONを保存</button></div><details><summary>解析用JSONを確認</summary><pre className="json-preview">{analysisJson(analysisResult.document)}</pre></details><h3 className="supplement-heading">AI解析用の補助画像</h3><div className="frame-grid">{analysisResult.frames.map((frame) => <figure key={frame.fileName}><img src={frame.previewUrl} alt={`${frame.timeLabel}時点の補助画像`} /><figcaption><span>{frame.timeLabel}</span><button type="button" onClick={() => downloadBlob(frame.blob, frame.fileName)}>PNG保存</button></figcaption></figure>)}</div></div>}</section>
       <footer><p>録画データを外部へ自動送信しません</p><p>対応環境：Windows版 Google Chrome / Microsoft Edge</p></footer>
     </main>
   )

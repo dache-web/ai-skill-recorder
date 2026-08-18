@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { flushSync } from 'react-dom'
 import { createAnalysisPackage } from './analysis/analysisPackage'
@@ -8,10 +8,10 @@ import { captureReviewPoint, createSegment, hasReachedSegmentEnd, MAX_POINT_COUN
 import type { AnalysisResult, RecordingSource, ReviewPoint, ReviewSegment } from './analysis/types'
 import { formatElapsed, safeRecordingName, supportedMimeType, type RecorderStatus, userFacingCaptureError } from './recorder'
 import { DEFAULT_REVIEW_SPLIT_RATIO, ratioFromTopHeight, readReviewSplitRatio, REVIEW_SPLITTER_HEIGHT, saveReviewSplitRatio, splitTopHeight } from './reviewSplit'
+import { initialReviewWorkflow, reviewWorkflowReducer, type ResumeAfter } from './reviewWorkflow'
 
 const stopTracks = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop())
 const ordered = <T extends { order: number }>(items: T[]): T[] => items.map((item, index) => ({ ...item, order: index + 1 }))
-type ReviewPauseReason = 'point-added' | 'video-segment-completed' | 'excluded-segment-completed'
 const reviewStorage = (): Storage | null => {
   try { return typeof window === 'undefined' ? null : window.localStorage }
   catch { return null }
@@ -34,11 +34,10 @@ function App() {
   const [points, setPoints] = useState<ReviewPoint[]>([])
   const [videoSegments, setVideoSegments] = useState<ReviewSegment[]>([])
   const [excludedSegments, setExcludedSegments] = useState<ReviewSegment[]>([])
-  const [activeSegment, setActiveSegment] = useState<{ kind: 'video' | 'excluded'; startSeconds: number } | null>(null)
+  const [reviewWorkflow, dispatchReviewWorkflow] = useReducer(reviewWorkflowReducer, initialReviewWorkflow)
   const [reviewMessage, setReviewMessage] = useState('')
   const [videoReady, setVideoReady] = useState(false)
   const [videoPlaying, setVideoPlaying] = useState(false)
-  const [pauseReason, setPauseReason] = useState<ReviewPauseReason | null>(null)
   const [splitRatio, setSplitRatio] = useState(() => readReviewSplitRatio(reviewStorage()))
   const [splitTopPixels, setSplitTopPixels] = useState<number | null>(null)
   const [reviewDialog, setReviewDialog] = useState<
@@ -57,6 +56,7 @@ function App() {
   const startedAtRef = useRef(0)
   const isStoppingRef = useRef(false)
   const previewRef = useRef<HTMLVideoElement>(null)
+  const playRequestRef = useRef<{ onPlaySeen: boolean; promiseResolved: boolean } | null>(null)
   const reviewWorkspaceRef = useRef<HTMLDivElement>(null)
   const splitDragRef = useRef<{ pointerId: number; containerTop: number; containerHeight: number; lastTopHeight: number } | null>(null)
   const reviewDialogRef = useRef<HTMLDialogElement>(null)
@@ -65,6 +65,8 @@ function App() {
   const videoSegmentSequenceRef = useRef(0)
   const excludedSegmentSequenceRef = useRef(0)
   const reviewUrl = importedUrl || videoUrl
+  const activeSegment = reviewWorkflow.selection
+  const pauseReason = reviewWorkflow.resumeAfter
   const overlapIds = useMemo(() => overlappingSegmentIds(videoSegments, excludedSegments), [videoSegments, excludedSegments])
 
   useEffect(() => {
@@ -75,7 +77,7 @@ function App() {
   useEffect(() => () => { stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current) }, [])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { if (importedUrl) URL.revokeObjectURL(importedUrl) }, [importedUrl])
-  useEffect(() => { setVideoReady(false); setVideoPlaying(false); setPauseReason(null) }, [reviewUrl])
+  useEffect(() => { setVideoReady(false); setVideoPlaying(false); playRequestRef.current = null; dispatchReviewWorkflow({ type: 'RESET' }) }, [reviewUrl])
   useEffect(() => {
     const workspace = reviewWorkspaceRef.current
     if (!workspace || !window.ResizeObserver) return
@@ -92,7 +94,7 @@ function App() {
   }
   const clearReview = () => {
     points.forEach((point) => URL.revokeObjectURL(point.previewUrl))
-    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setActiveSegment(null); setReviewMessage(''); setVideoPlaying(false); setPauseReason(null)
+    setPoints([]); setVideoSegments([]); setExcludedSegments([]); dispatchReviewWorkflow({ type: 'RESET' }); setReviewMessage(''); setVideoPlaying(false); playRequestRef.current = null
     pointSequenceRef.current = 0; videoSegmentSequenceRef.current = 0; excludedSegmentSequenceRef.current = 0
     resetAnalysis()
   }
@@ -172,18 +174,27 @@ function App() {
   }
   const resumeReviewPlayback = async (messageText = '動画を再生しています。') => {
     const video = previewRef.current; if (!video) return
-    try { await video.play(); setVideoPlaying(true); setPauseReason(null); setReviewMessage(messageText) }
-    catch { setReviewMessage('再生を開始できませんでした。動画プレイヤーの再生ボタンを押してください。') }
+    const request = { onPlaySeen: false, promiseResolved: false }
+    playRequestRef.current = request
+    try {
+      await video.play()
+      request.promiseResolved = true
+      dispatchReviewWorkflow({ type: 'PLAY_CONFIRMED' }); setVideoPlaying(true); setReviewMessage(messageText)
+      if (request.onPlaySeen) playRequestRef.current = null
+    } catch {
+      if (playRequestRef.current === request) playRequestRef.current = null
+      setReviewMessage('再生を開始できませんでした。もう一度同じ再生操作をお試しください。')
+    }
   }
   const addPoint = async () => {
     const video = previewRef.current; if (!video) return
-    if (pauseReason === 'point-added') { await resumeReviewPlayback('ポイントを追加した位置から再生を続けています。'); return }
+    if (pauseReason === 'point') { await resumeReviewPlayback('ポイントを追加した位置から再生を続けています。'); return }
     if (points.length >= MAX_POINT_COUNT) { setReviewMessage(`ポイントは最大${MAX_POINT_COUNT}件です。不要なポイントを削除してから追加してください。`); return }
     const timeSeconds = currentVideoTime(); if (timeSeconds === null) return
     video.pause()
     try {
       const point = await captureReviewPoint(video, ++pointSequenceRef.current, timeSeconds); setPoints((current) => ordered([...current, point])); resetAnalysis()
-      setPauseReason('point-added')
+      dispatchReviewWorkflow({ type: 'POINT_ADDED' })
       setReviewMessage(`★ポイントを追加しました\n${point.timeLabel}`)
     } catch (pointError) { setReviewMessage(pointError instanceof Error ? pointError.message : 'ポイントを追加できませんでした。') }
   }
@@ -197,7 +208,7 @@ function App() {
         if (point.id !== id) return point
         URL.revokeObjectURL(point.previewUrl); return { ...replacement, id: point.id, order: point.order }
       }))
-      setPauseReason('point-added')
+      dispatchReviewWorkflow({ type: 'POINT_ADDED' })
       resetAnalysis(); setReviewMessage(`${replacement.timeLabel}へポイント位置と画像を変更しました。`)
     } catch (pointError) { setReviewMessage(pointError instanceof Error ? pointError.message : 'ポイントを変更できませんでした。') }
   }
@@ -208,10 +219,10 @@ function App() {
 
   const toggleSegment = (kind: 'video' | 'excluded') => {
     const video = previewRef.current
-    const completedReason: ReviewPauseReason = kind === 'video' ? 'video-segment-completed' : 'excluded-segment-completed'
+    const completedReason: ResumeAfter = kind === 'video' ? 'video-segment' : 'excluded-segment'
     if (!activeSegment && pauseReason === completedReason) { void resumeReviewPlayback(`${kind === 'video' ? '動画区間' : '不要区間'}の終了位置から再生を続けています。`); return }
     const time = currentVideoTime(); if (!video || time === null) return
-    if (!activeSegment) { setPauseReason(null); setActiveSegment({ kind, startSeconds: time }); setReviewMessage(''); return }
+    if (!activeSegment) { dispatchReviewWorkflow({ type: 'START_SELECTION', kind, startSeconds: time }); setReviewMessage(''); return }
     if (activeSegment.kind !== kind) { setReviewMessage('先に開始中の区間を終了またはキャンセルしてください。'); return }
     try {
       const label = kind === 'video' ? '動画区間' : '不要区間'
@@ -222,9 +233,9 @@ function App() {
       } else {
         setExcludedSegments((current) => [...current, { ...segment, order: current.length + 1 }])
       }
-      setActiveSegment(null)
+      dispatchReviewWorkflow({ type: 'COMPLETE_SELECTION', kind })
       video.pause()
-      setVideoPlaying(false); setPauseReason(completedReason); resetAnalysis()
+      setVideoPlaying(false); resetAnalysis()
       setReviewMessage(`${label}を追加しました\n${formatElapsed(Math.floor(segment.startSeconds))} → ${formatElapsed(Math.floor(segment.endSeconds))}`)
     } catch (segmentError) { setReviewMessage(segmentError instanceof Error ? segmentError.message : '区間を追加できませんでした。') }
   }
@@ -294,9 +305,16 @@ function App() {
     const video = previewRef.current
     setVideoReady(Boolean(video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && Number.isFinite(video.currentTime)))
   }
+  const observeVideoPlay = () => {
+    setVideoPlaying(true)
+    const request = playRequestRef.current
+    if (!request) { dispatchReviewWorkflow({ type: 'EXTERNAL_PLAY_CONFIRMED' }); return }
+    request.onPlaySeen = true
+    if (request.promiseResolved) playRequestRef.current = null
+  }
   const togglePlayback = async () => {
     if (!previewRef.current) return
-    if (!previewRef.current.paused) { previewRef.current.pause(); setVideoPlaying(false); setPauseReason(null); setReviewMessage('動画を一時停止しました。'); return }
+    if (!previewRef.current.paused) { previewRef.current.pause(); setVideoPlaying(false); setReviewMessage('動画を一時停止しました。'); return }
     await resumeReviewPlayback()
   }
 
@@ -306,7 +324,7 @@ function App() {
     if (activeSegment) { setReviewMessage('先に開始中の区間を終了またはキャンセルしてください。'); return }
     video.pause()
     video.currentTime = normalizeTime(timeSeconds, Number.isFinite(video.duration) ? video.duration : undefined)
-    setVideoPlaying(false); setPauseReason(null); setReviewMessage(`${label}を上の動画に表示しました。`)
+    setVideoPlaying(false); dispatchReviewWorkflow({ type: 'SEEKED' }); setReviewMessage(`${label}を上の動画に表示しました。`)
   }
 
   const updateSplitPreview = (clientY: number) => {
@@ -380,16 +398,16 @@ function App() {
         {reviewUrl ? <div ref={reviewWorkspaceRef} className="review-workspace" style={splitTopPixels === null ? undefined : { '--review-top-height': `${splitTopPixels}px` } as CSSProperties}>
           <div className="review-stage">
             {videoSourceControls}
-            <video ref={previewRef} className="video-player review-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={() => { setVideoPlaying(true); setPauseReason(null) }} onPause={() => setVideoPlaying(false)} onEnded={() => { setVideoPlaying(false); setPauseReason(null) }} onSeeking={() => setPauseReason(null)} />
+            <video ref={previewRef} className="video-player review-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={observeVideoPlay} onPause={() => setVideoPlaying(false)} onEnded={() => setVideoPlaying(false)} onSeeking={() => dispatchReviewWorkflow({ type: 'SEEKED' })} />
             <div className="review-controls">
               <button className="review-control playback-button" type="button" onClick={togglePlayback} disabled={!videoReady}>{videoPlaying ? '⏸ 一時停止' : pauseReason ? '▶ 再生を続ける' : '▶ 再生する'}</button>
-              <button className="review-control point-button" type="button" onClick={addPoint} disabled={!videoReady}>{pauseReason === 'point-added' ? '▶ ポイント後を再生' : '★ ポイント'}</button>
-              <button className={`review-control ${activeSegment?.kind === 'video' ? 'active-control' : ''}`} type="button" onClick={() => toggleSegment('video')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : pauseReason === 'video-segment-completed' ? '▶ 動画を再開' : '動画区間 開始'}</button>
-              <button className={`review-control ${activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''}`} type="button" onClick={() => toggleSegment('excluded')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : pauseReason === 'excluded-segment-completed' ? '▶ 動画を再開' : '不要区間 開始'}</button>
-              <button className="review-control cancel-control" type="button" disabled={!activeSegment} onClick={() => { setActiveSegment(null); setReviewMessage('区間指定をキャンセルしました。') }}>キャンセル</button>
+              <button className="review-control point-button" type="button" onClick={addPoint} disabled={!videoReady}>{pauseReason === 'point' ? '▶ ポイント後を再生' : '★ ポイント'}</button>
+              <button className={`review-control ${activeSegment?.kind === 'video' ? 'active-control' : ''}`} type="button" onClick={() => toggleSegment('video')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : pauseReason === 'video-segment' ? '▶ 動画を再開' : '動画区間 開始'}</button>
+              <button className={`review-control ${activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''}`} type="button" onClick={() => toggleSegment('excluded')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : pauseReason === 'excluded-segment' ? '▶ 動画を再開' : '不要区間 開始'}</button>
+              <button className="review-control cancel-control" type="button" disabled={!activeSegment} onClick={() => { dispatchReviewWorkflow({ type: 'CANCEL_SELECTION' }); setReviewMessage('区間指定をキャンセルしました。') }}>キャンセル</button>
             </div>
             {!videoReady && <p className="video-preparing" aria-live="polite">動画を準備しています…</p>}
-            <div className="review-message" aria-live="polite">{activeSegment ? <><strong>{activeSegment.kind === 'video' ? '動画区間' : '不要区間'}を指定中</strong><span>開始：{formatElapsed(Math.floor(activeSegment.startSeconds))}</span></> : reviewMessage ? reviewMessage.split('\n').map((line, index) => index === 0 ? <strong key={line}>{line}</strong> : <span key={line}>{line}</span>) : <span>動画を再生し、残したい場面を指定してください。</span>}</div>
+            <div className="review-message" aria-live="polite">{activeSegment ? <><strong>{activeSegment.kind === 'video' ? '動画区間' : '不要区間'}を指定中</strong><span>開始：{formatElapsed(Math.floor(activeSegment.startSeconds))}</span>{reviewMessage && <span className="review-workflow-error">{reviewMessage}</span>}</> : reviewMessage ? reviewMessage.split('\n').map((line, index) => index === 0 ? <strong key={line}>{line}</strong> : <span key={line}>{line}</span>) : <span>動画を再生し、残したい場面を指定してください。</span>}</div>
           </div>
           <div className="review-splitter" role="separator" aria-label="動画と登録結果の表示比率" aria-orientation="horizontal" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(splitRatio * 100)} tabIndex={0} onPointerDown={beginSplitDrag} onPointerMove={moveSplitDrag} onPointerUp={finishSplitDrag} onPointerCancel={finishSplitDrag} onKeyDown={handleSplitKeyboard} onDoubleClick={() => setSplitByRatio(DEFAULT_REVIEW_SPLIT_RATIO)}><span aria-hidden="true">＝</span></div>
           <div className="review-results">

@@ -35,11 +35,42 @@ export interface ReviewSegment {
   durationSeconds: number
 }
 
+export type TimelineContentType = 'video' | 'point'
+export type TimelineItemStatus = 'active' | 'excluded'
+export type TimelineSourceCollection = 'points' | 'videoSegments' | 'excludedSegments'
+
+export interface TimelineItem {
+  id: string
+  contentType: TimelineContentType
+  sourceId: string
+  sourceCollection: TimelineSourceCollection
+  registeredOrder: number
+  manualOrder: number
+  thumbnailFileName: string
+  status: TimelineItemStatus
+}
+
+export interface ManualTimelineItem extends TimelineItem {
+  pointSeconds?: number
+  startSeconds?: number
+  endSeconds?: number
+}
+
+export interface ManualTimeline {
+  status: 'draft' | 'confirmed'
+  confirmedAt: string | null
+  fullReviewCompletedAt: string | null
+  overlapAcknowledgedAt: string | null
+  items: ManualTimelineItem[]
+  unclassifiedIntervals: Array<{ startSeconds: number; endSeconds: number; durationSeconds: number }>
+}
+
 export interface ReviewAnnotations {
   maximumPoints: number
   points: ReviewPointData[]
   videoSegments: ReviewSegment[]
   excludedSegments: Array<ReviewSegment & { treatment: 'exclude-candidate' }>
+  manualTimeline: ManualTimeline
 }
 
 export interface ReviewPoint extends ReviewPointData {

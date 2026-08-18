@@ -38,6 +38,7 @@ describe('STEP2-1 analysis helpers', () => {
     expect(document.originalWebM.immutableSource).toBe(true)
     expect(document.schemaVersion).toBe('step2-1-preview-2')
     expect(document.reviewAnnotations.points).toEqual([])
+    expect(document.reviewAnnotations.manualTimeline.status).toBe('draft')
   })
 
   it('ポイント時刻を動画の範囲内に正規化する', () => {

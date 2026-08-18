@@ -13,7 +13,7 @@ export const buildAnalysisDocument = (
   source: RecordingSource,
   intervalSeconds: number,
   extracted: ExtractedRecording,
-  reviewAnnotations: ReviewAnnotations = { maximumPoints: 30, points: [], videoSegments: [], excludedSegments: [] },
+  reviewAnnotations: ReviewAnnotations = { maximumPoints: 30, points: [], videoSegments: [], excludedSegments: [], manualTimeline: { status: 'draft', confirmedAt: null, fullReviewCompletedAt: null, overlapAcknowledgedAt: null, items: [], unclassifiedIntervals: [] } },
   generatedAt = new Date(),
 ): AnalysisDocument => {
   const limitations: string[] = []

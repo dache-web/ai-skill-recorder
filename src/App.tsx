@@ -30,6 +30,7 @@ function App() {
   const [activeSegment, setActiveSegment] = useState<{ kind: 'video' | 'excluded'; startSeconds: number } | null>(null)
   const [reviewMessage, setReviewMessage] = useState('')
   const [videoReady, setVideoReady] = useState(false)
+  const [videoPlaying, setVideoPlaying] = useState(false)
   const [pausedByReviewAction, setPausedByReviewAction] = useState(false)
   const [reviewDialog, setReviewDialog] = useState<
     | { type: 'point'; point: ReviewPoint }
@@ -63,7 +64,7 @@ function App() {
   useEffect(() => () => { stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current) }, [])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { if (importedUrl) URL.revokeObjectURL(importedUrl) }, [importedUrl])
-  useEffect(() => { setVideoReady(false); setPausedByReviewAction(false) }, [reviewUrl])
+  useEffect(() => { setVideoReady(false); setVideoPlaying(false); setPausedByReviewAction(false) }, [reviewUrl])
 
   const resetAnalysis = () => {
     analysisResult?.frames.forEach((frame) => URL.revokeObjectURL(frame.previewUrl))
@@ -71,7 +72,7 @@ function App() {
   }
   const clearReview = () => {
     points.forEach((point) => URL.revokeObjectURL(point.previewUrl))
-    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setActiveSegment(null); setReviewMessage(''); setPausedByReviewAction(false)
+    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setActiveSegment(null); setReviewMessage(''); setVideoPlaying(false); setPausedByReviewAction(false)
     pointSequenceRef.current = 0; videoSegmentSequenceRef.current = 0; excludedSegmentSequenceRef.current = 0
     resetAnalysis()
   }
@@ -156,7 +157,7 @@ function App() {
     video.pause(); setPausedByReviewAction(true)
     try {
       const point = await captureReviewPoint(video, ++pointSequenceRef.current, timeSeconds); setPoints((current) => ordered([...current, point])); resetAnalysis()
-      setReviewMessage(`${point.timeLabel}をポイントに追加し、確認のため一時停止しました。`)
+      setReviewMessage(`★ポイントを追加しました\n${point.timeLabel}`)
     } catch (pointError) { setReviewMessage(pointError instanceof Error ? pointError.message : 'ポイントを追加できませんでした。') }
   }
   const replacePoint = async (id: string) => {
@@ -178,19 +179,23 @@ function App() {
   }
 
   const toggleSegment = (kind: 'video' | 'excluded') => {
-    const time = currentVideoTime(); if (time === null) return
-    if (!activeSegment) { setActiveSegment({ kind, startSeconds: time }); setReviewMessage(`${kind === 'video' ? '動画区間' : '不要区間'}の開始位置を${formatElapsed(Math.floor(time))}に設定しました。`); return }
+    const video = previewRef.current
+    const time = currentVideoTime(); if (!video || time === null) return
+    if (!activeSegment) { setActiveSegment({ kind, startSeconds: time }); setReviewMessage(''); return }
     if (activeSegment.kind !== kind) { setReviewMessage('先に開始中の区間を終了またはキャンセルしてください。'); return }
     try {
+      const label = kind === 'video' ? '動画区間' : '不要区間'
+      const sequence = kind === 'video' ? ++videoSegmentSequenceRef.current : ++excludedSegmentSequenceRef.current
+      const segment = createSegment(`${kind === 'video' ? 'video' : 'excluded'}-segment-${sequence}`, 0, activeSegment.startSeconds, time)
       if (kind === 'video') {
-        const sequence = ++videoSegmentSequenceRef.current
-        setVideoSegments((current) => [...current, createSegment(`video-segment-${sequence}`, current.length + 1, activeSegment.startSeconds, time)])
+        setVideoSegments((current) => [...current, { ...segment, order: current.length + 1 }])
       } else {
-        const sequence = ++excludedSegmentSequenceRef.current
-        setExcludedSegments((current) => [...current, createSegment(`excluded-segment-${sequence}`, current.length + 1, activeSegment.startSeconds, time)])
+        setExcludedSegments((current) => [...current, { ...segment, order: current.length + 1 }])
       }
-      previewRef.current?.pause(); setPausedByReviewAction(true)
-      setActiveSegment(null); resetAnalysis(); setReviewMessage(`${kind === 'video' ? '動画区間' : '不要区間'}を追加し、終了位置で一時停止しました。`)
+      setActiveSegment(null)
+      video.pause()
+      setVideoPlaying(false); setPausedByReviewAction(true); resetAnalysis()
+      setReviewMessage(`${label}を追加しました\n${formatElapsed(Math.floor(segment.startSeconds))} → ${formatElapsed(Math.floor(segment.endSeconds))}`)
     } catch (segmentError) { setReviewMessage(segmentError instanceof Error ? segmentError.message : '区間を追加できませんでした。') }
   }
   const changeSegmentBoundary = (kind: 'video' | 'excluded', id: string, boundary: 'start' | 'end') => {
@@ -259,9 +264,10 @@ function App() {
     const video = previewRef.current
     setVideoReady(Boolean(video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && Number.isFinite(video.currentTime)))
   }
-  const continuePlayback = async () => {
+  const togglePlayback = async () => {
     if (!previewRef.current) return
-    try { await previewRef.current.play(); setPausedByReviewAction(false); setReviewMessage('同じ位置から再生を続けています。') }
+    if (!previewRef.current.paused) { previewRef.current.pause(); setVideoPlaying(false); setPausedByReviewAction(false); setReviewMessage('動画を一時停止しました。'); return }
+    try { await previewRef.current.play(); setVideoPlaying(true); setPausedByReviewAction(false); setReviewMessage('動画を再生しています。') }
     catch { setReviewMessage('再生を開始できませんでした。動画プレイヤーの再生ボタンを押してください。') }
   }
 
@@ -292,18 +298,18 @@ function App() {
         <p className="review-guidance">動画を見ながら、重要な場面、動画で残す部分、不要な部分を指定します。元WebMは変更されません。</p>
         {reviewUrl ? <div className="review-workspace">
           <div className="review-stage">
-            <video ref={previewRef} className="video-player review-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={() => setPausedByReviewAction(false)} />
+            <video ref={previewRef} className="video-player review-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={() => { setVideoPlaying(true); setPausedByReviewAction(false) }} onPause={() => setVideoPlaying(false)} onEnded={() => { setVideoPlaying(false); setPausedByReviewAction(false) }} />
             <div className="review-controls">
               {!videoReady && <p className="video-preparing" aria-live="polite">動画を準備しています…</p>}
+              <button className="continue-button playback-button" type="button" onClick={togglePlayback} disabled={!videoReady}>{videoPlaying ? '⏸ 一時停止' : pausedByReviewAction ? '▶ 再生を続ける' : '▶ 再生する'}</button>
               <button className="point-button" type="button" onClick={addPoint} disabled={!videoReady}>★ この場面をポイント追加</button>
               <div className="segment-controls">
                 <button type="button" className={activeSegment?.kind === 'video' ? 'active-control' : ''} onClick={() => toggleSegment('video')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : '動画区間 開始'}</button>
                 <button type="button" className={activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''} onClick={() => toggleSegment('excluded')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : '不要区間 開始'}</button>
               </div>
-              {pausedByReviewAction && <button className="continue-button" type="button" onClick={continuePlayback}>▶ 再生を続ける</button>}
               {activeSegment && <button className="cancel-link" type="button" onClick={() => { setActiveSegment(null); setReviewMessage('区間指定をキャンセルしました。') }}>区間指定をキャンセル</button>}
             </div>
-            {reviewMessage && <div className="review-message" aria-live="polite">{reviewMessage}</div>}
+            <div className="review-message" aria-live="polite">{activeSegment ? <><strong>{activeSegment.kind === 'video' ? '動画区間' : '不要区間'}を指定中</strong><span>開始：{formatElapsed(Math.floor(activeSegment.startSeconds))}</span></> : reviewMessage ? reviewMessage.split('\n').map((line, index) => index === 0 ? <strong key={line}>{line}</strong> : <span key={line}>{line}</span>) : <span>動画を再生し、残したい場面を指定してください。</span>}</div>
           </div>
           <div className="review-results">
             <div className="registered-heading"><h3>登録した内容</h3><span>この領域をスクロールして確認できます</span></div>

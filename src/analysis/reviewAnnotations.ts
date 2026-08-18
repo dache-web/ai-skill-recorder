@@ -58,6 +58,9 @@ export const createSegment = (
 export const segmentsOverlap = (first: ReviewSegment, second: ReviewSegment): boolean =>
   first.startSeconds < second.endSeconds && second.startSeconds < first.endSeconds
 
+export const hasReachedSegmentEnd = (currentTime: number, endSeconds: number): boolean =>
+  Number.isFinite(currentTime) && currentTime >= endSeconds
+
 export const overlappingSegmentIds = (
   videoSegments: ReviewSegment[],
   excludedSegments: ReviewSegment[],

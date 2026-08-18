@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { createAnalysisPackage } from './analysis/analysisPackage'
 import { analysisJson, downloadBlob, downloadJson } from './analysis/export'
 import { FRAME_INTERVAL_OPTIONS } from './analysis/frameExtractor'
-import { captureReviewPoint, createSegment, MAX_POINT_COUNT, normalizeTime, overlappingSegmentIds, pointData } from './analysis/reviewAnnotations'
+import { captureReviewPoint, createSegment, hasReachedSegmentEnd, MAX_POINT_COUNT, normalizeTime, overlappingSegmentIds, pointData } from './analysis/reviewAnnotations'
 import type { AnalysisResult, RecordingSource, ReviewPoint, ReviewSegment } from './analysis/types'
 import { formatElapsed, safeRecordingName, supportedMimeType, type RecorderStatus, userFacingCaptureError } from './recorder'
 
@@ -30,6 +31,11 @@ function App() {
   const [reviewMessage, setReviewMessage] = useState('')
   const [videoReady, setVideoReady] = useState(false)
   const [pausedByReviewAction, setPausedByReviewAction] = useState(false)
+  const [reviewDialog, setReviewDialog] = useState<
+    | { type: 'point'; point: ReviewPoint }
+    | { type: 'segment'; kind: 'video' | 'excluded'; segment: ReviewSegment }
+    | null
+  >(null)
   const [frameInterval, setFrameInterval] = useState(5)
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
   const [analysisBusy, setAnalysisBusy] = useState(false)
@@ -41,6 +47,8 @@ function App() {
   const startedAtRef = useRef(0)
   const isStoppingRef = useRef(false)
   const previewRef = useRef<HTMLVideoElement>(null)
+  const reviewDialogRef = useRef<HTMLDialogElement>(null)
+  const segmentPreviewRef = useRef<HTMLVideoElement>(null)
   const pointSequenceRef = useRef(0)
   const videoSegmentSequenceRef = useRef(0)
   const excludedSegmentSequenceRef = useRef(0)
@@ -201,10 +209,31 @@ function App() {
     else setExcludedSegments((current) => ordered(current.filter((segment) => segment.id !== id)))
     resetAnalysis(); setReviewMessage('区間指定を削除しました。元WebMは変更されていません。')
   }
-  const confirmSegment = async (segment: ReviewSegment) => {
-    if (!previewRef.current) return
-    previewRef.current.currentTime = segment.startSeconds
-    try { await previewRef.current.play() } catch { setReviewMessage('開始位置へ移動しました。再生ボタンを押して確認してください。') }
+  const closeReviewDialog = () => {
+    segmentPreviewRef.current?.pause()
+    reviewDialogRef.current?.close()
+  }
+  const openPointPreview = (point: ReviewPoint) => {
+    setReviewDialog({ type: 'point', point })
+    if (!reviewDialogRef.current?.open) reviewDialogRef.current?.showModal()
+  }
+  const openSegmentPreview = (kind: 'video' | 'excluded', segment: ReviewSegment) => {
+    flushSync(() => setReviewDialog({ type: 'segment', kind, segment }))
+    const video = segmentPreviewRef.current
+    if (video) {
+      video.pause()
+      const beginPreview = () => {
+        const playFromStart = () => { void video.play().catch(() => undefined) }
+        if (Math.abs(video.currentTime - segment.startSeconds) < 0.01) playFromStart()
+        else {
+          video.addEventListener('seeked', playFromStart, { once: true })
+          video.currentTime = segment.startSeconds
+        }
+      }
+      if (video.readyState === HTMLMediaElement.HAVE_NOTHING) video.addEventListener('loadedmetadata', beginPreview, { once: true })
+      else beginPreview()
+    }
+    if (!reviewDialogRef.current?.open) reviewDialogRef.current?.showModal()
   }
 
   const reviewAnnotations = () => ({
@@ -242,7 +271,7 @@ function App() {
       {segments.map((segment) => <article className={`segment-item ${overlapIds.has(segment.id) ? 'has-overlap' : ''}`} key={segment.id}>
         <div><strong>{kind === 'video' ? `区間${segment.order}` : `不要${segment.order}`}</strong><span>{formatElapsed(Math.floor(segment.startSeconds))} → {formatElapsed(Math.floor(segment.endSeconds))}（{segment.durationSeconds}秒）</span></div>
         {overlapIds.has(segment.id) && <p className="overlap-warning">指定が重複しています。情報は両方とも保持されます。</p>}
-        <div className="item-actions"><button type="button" onClick={() => confirmSegment(segment)}>確認</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'start')}>開始変更</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'end')}>終了変更</button><button className="danger-link" type="button" onClick={() => deleteSegment(kind, segment.id)}>削除</button></div>
+        <div className="item-actions"><button type="button" onClick={() => openSegmentPreview(kind, segment)}>確認</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'start')}>開始変更</button><button type="button" onClick={() => changeSegmentBoundary(kind, segment.id, 'end')}>終了変更</button><button className="danger-link" type="button" onClick={() => deleteSegment(kind, segment.id)}>削除</button></div>
       </article>)}
     </div>
   )
@@ -255,7 +284,53 @@ function App() {
 
       <section className="source-card" aria-labelledby="source-title"><div className="preview-heading"><div><p className="section-number">02</p><h2 id="source-title">元動画を用意</h2></div><span className="ready-label">ORIGINAL WEBM</span></div><p className="analysis-lead">録画直後の動画、または保存済みWebMを使用できます。原本は編集・上書き・再エンコードされません。</p><label className="file-field">保存済みWebMを読み込む（任意）<input type="file" accept="video/webm,.webm" onChange={(event) => importWebM(event.target.files?.[0] ?? null)} /></label>{recordingBlob && !importedFile && <div className="preview-actions"><button className="primary-button" type="button" onClick={saveRecording}>元WebMをPCへ保存</button></div>}{importedFile && <p className="analysis-hint">読み込み中の原本: {importedFile.name}</p>}</section>
 
-      {reviewUrl && <section className="review-card" aria-labelledby="review-title"><div className="preview-heading"><div><p className="section-number">03</p><h2 id="review-title">重要な場面を確認</h2></div><span className="ready-label">REVIEW</span></div><p className="analysis-lead">動画を見ながら「重要」「動画で残す」「不要」の指定だけを追加します。元WebMは変更されません。</p><video ref={previewRef} className="video-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={() => setPausedByReviewAction(false)} /><div className="review-controls">{!videoReady && <p className="video-preparing" aria-live="polite">動画を準備しています…</p>}<button className="point-button" type="button" onClick={addPoint} disabled={!videoReady}>★ この場面をポイント追加</button><div className="segment-controls"><button type="button" className={activeSegment?.kind === 'video' ? 'active-control' : ''} onClick={() => toggleSegment('video')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : '動画区間 開始'}</button><button type="button" className={activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''} onClick={() => toggleSegment('excluded')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : '不要区間 開始'}</button></div>{pausedByReviewAction && <button className="continue-button" type="button" onClick={continuePlayback}>▶ 再生を続ける</button>}{activeSegment && <button className="cancel-link" type="button" onClick={() => { setActiveSegment(null); setReviewMessage('区間指定をキャンセルしました。') }}>区間指定をキャンセル</button>}</div>{reviewMessage && <div className="review-message" aria-live="polite">{reviewMessage}</div>}<div className="review-results"><section><div className="result-heading"><h3>重要ポイント</h3><span>{points.length} / {MAX_POINT_COUNT}</span></div>{points.length === 0 && <p className="empty-state">まだポイントはありません。</p>}<div className="point-grid">{points.map((point) => <article className="point-item" key={point.id}><img src={point.previewUrl} alt={`${point.timeLabel}のポイント画面`} onLoad={(event) => { if (!event.currentTarget.naturalWidth || !event.currentTarget.naturalHeight) setReviewMessage('ポイント画像を正常に表示できませんでした。') }} onError={() => setReviewMessage('ポイント画像を読み込めませんでした。')} /><div><strong>★{point.order}</strong><span>{point.timeLabel}（{point.timeSeconds}秒）</span></div><div className="item-actions"><button type="button" onClick={() => { if (previewRef.current) previewRef.current.currentTime = point.timeSeconds }}>確認</button><button type="button" onClick={() => replacePoint(point.id)}>現在位置へ変更</button><button className="danger-link" type="button" onClick={() => deletePoint(point.id)}>削除</button><button type="button" onClick={() => downloadBlob(point.blob, point.imageFileName)}>PNG保存</button></div></article>)}</div></section><section><h3>動画区間</h3>{segmentList('video', videoSegments)}</section><section><h3>不要区間</h3>{segmentList('excluded', excludedSegments)}</section></div></section>}
+      {reviewUrl && <section className="review-card" aria-labelledby="review-title">
+        <div className="preview-heading"><div><p className="section-number">03</p><h2 id="review-title">重要な場面を確認</h2></div><span className="ready-label">REVIEW</span></div>
+        <p className="analysis-lead">動画を見ながら「重要」「動画で残す」「不要」の指定だけを追加します。元WebMは変更されません。</p>
+        <div className="review-workspace">
+          <div className="review-stage">
+            <video ref={previewRef} className="video-player review-player" src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={() => setPausedByReviewAction(false)} />
+            <div className="review-controls">
+              {!videoReady && <p className="video-preparing" aria-live="polite">動画を準備しています…</p>}
+              <button className="point-button" type="button" onClick={addPoint} disabled={!videoReady}>★ この場面をポイント追加</button>
+              <div className="segment-controls">
+                <button type="button" className={activeSegment?.kind === 'video' ? 'active-control' : ''} onClick={() => toggleSegment('video')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'video')}>{activeSegment?.kind === 'video' ? '動画区間 終了' : '動画区間 開始'}</button>
+                <button type="button" className={activeSegment?.kind === 'excluded' ? 'active-control excluded' : ''} onClick={() => toggleSegment('excluded')} disabled={!videoReady || Boolean(activeSegment && activeSegment.kind !== 'excluded')}>{activeSegment?.kind === 'excluded' ? '不要区間 終了' : '不要区間 開始'}</button>
+              </div>
+              {pausedByReviewAction && <button className="continue-button" type="button" onClick={continuePlayback}>▶ 再生を続ける</button>}
+              {activeSegment && <button className="cancel-link" type="button" onClick={() => { setActiveSegment(null); setReviewMessage('区間指定をキャンセルしました。') }}>区間指定をキャンセル</button>}
+            </div>
+            {reviewMessage && <div className="review-message" aria-live="polite">{reviewMessage}</div>}
+          </div>
+          <div className="review-results">
+            <section>
+              <div className="result-heading"><h3>重要ポイント</h3><span>{points.length} / {MAX_POINT_COUNT}</span></div>
+              {points.length === 0 && <p className="empty-state">まだポイントはありません。</p>}
+              <div className="point-grid">{points.map((point) => <article className="point-item" key={point.id}>
+                <img src={point.previewUrl} alt={`${point.timeLabel}のポイント画面`} onLoad={(event) => { if (!event.currentTarget.naturalWidth || !event.currentTarget.naturalHeight) setReviewMessage('ポイント画像を正常に表示できませんでした。') }} onError={() => setReviewMessage('ポイント画像を読み込めませんでした。')} />
+                <div><strong>★{point.order}</strong><span>{point.timeLabel}（{point.timeSeconds}秒）</span></div>
+                <div className="item-actions"><button type="button" onClick={() => openPointPreview(point)}>確認</button><button type="button" onClick={() => replacePoint(point.id)}>現在位置へ変更</button><button className="danger-link" type="button" onClick={() => deletePoint(point.id)}>削除</button><button type="button" onClick={() => downloadBlob(point.blob, point.imageFileName)}>PNG保存</button></div>
+              </article>)}</div>
+            </section>
+            <section><h3>動画区間</h3>{segmentList('video', videoSegments)}</section>
+            <section><h3>不要区間</h3>{segmentList('excluded', excludedSegments)}</section>
+          </div>
+        </div>
+      </section>}
+
+      <dialog ref={reviewDialogRef} className="review-dialog" onClose={() => { segmentPreviewRef.current?.pause(); setReviewDialog(null) }}>
+        {reviewDialog?.type === 'point' && <div className="dialog-content">
+          <div className="dialog-heading"><div><p className="section-number">POINT PREVIEW</p><h3>★ポイント{reviewDialog.point.order}</h3></div><span>{reviewDialog.point.timeLabel}（{reviewDialog.point.timeSeconds}秒）</span></div>
+          <img className="dialog-point-image" src={reviewDialog.point.previewUrl} alt={`★ポイント${reviewDialog.point.order}の拡大画像`} />
+          <div className="dialog-actions"><button className="primary-button" type="button" onClick={closeReviewDialog}>閉じる</button></div>
+        </div>}
+        {reviewDialog?.type === 'segment' && <div className="dialog-content">
+          <div className="dialog-heading"><div><p className="section-number">SEGMENT PREVIEW</p><h3>{reviewDialog.kind === 'video' ? '動画区間の確認' : '不要区間の確認'}</h3></div><span>{formatElapsed(Math.floor(reviewDialog.segment.startSeconds))} → {formatElapsed(Math.floor(reviewDialog.segment.endSeconds))}</span></div>
+          <p className="dialog-note">{reviewDialog.kind === 'excluded' ? '本当に不要部分として指定してよいか確認できます。確認しても指定内容は変更されません。' : '指定した開始位置から終了位置までを確認再生します。'}</p>
+          <video ref={segmentPreviewRef} className="dialog-video" src={reviewUrl} controls playsInline preload="metadata" onTimeUpdate={(event) => { if (hasReachedSegmentEnd(event.currentTarget.currentTime, reviewDialog.segment.endSeconds)) event.currentTarget.pause() }} />
+          <div className="dialog-actions"><button className="secondary-button" type="button" onClick={() => openSegmentPreview(reviewDialog.kind, reviewDialog.segment)}>最初から確認</button><button className="primary-button" type="button" onClick={closeReviewDialog}>閉じる</button></div>
+        </div>}
+      </dialog>
 
       <section className="analysis-card" aria-labelledby="analysis-title"><div className="preview-heading"><div><p className="section-number">04</p><h2 id="analysis-title">解析データを作成</h2></div><span className="ready-label">STEP 2-1</span></div><p className="analysis-lead">指定情報をJSONにまとめ、AI解析用の補助画像を一定間隔で生成します。すべてブラウザ内で処理します。</p><div className="analysis-settings"><label>補助画像の間隔<select value={frameInterval} onChange={(event) => { resetAnalysis(); setFrameInterval(Number(event.target.value)) }}>{FRAME_INTERVAL_OPTIONS.map((seconds) => <option key={seconds} value={seconds}>{seconds}秒</option>)}</select></label><p>補助画像は最大30枚。★ポイントPNGが主データです。</p></div><button className="primary-button" type="button" onClick={prepareAnalysis} disabled={analysisBusy || !reviewUrl}>{analysisBusy ? '解析データ作成中…' : '解析データを作成'}</button>{!reviewUrl && <p className="analysis-hint">録画を完了するか、保存済みWebMを選択してください。</p>}{analysisMessage && <div className="privacy-note" aria-live="polite"><span aria-hidden="true">◆</span><p>{analysisMessage}</p></div>}{analysisResult && <div className="analysis-result"><div className="analysis-summary"><h3>解析データ</h3><dl><div><dt>元WebM</dt><dd>{analysisResult.document.recording.fileName}</dd></div><div><dt>原本</dt><dd>変更なし</dd></div><div><dt>ポイント</dt><dd>{points.length}件</dd></div><div><dt>動画区間</dt><dd>{videoSegments.length}件</dd></div><div><dt>不要区間</dt><dd>{excludedSegments.length}件</dd></div><div><dt>補助PNG</dt><dd>{analysisResult.frames.length}枚</dd></div></dl></div><div className="preview-actions"><button className="secondary-button" type="button" onClick={saveOriginalWebM}>元WebMを保存</button><button className="secondary-button" type="button" onClick={copyAnalysisJson}>JSONをコピー</button><button className="primary-button" type="button" onClick={() => downloadJson(analysisResult.document)}>JSONを保存</button></div><details><summary>解析用JSONを確認</summary><pre className="json-preview">{analysisJson(analysisResult.document)}</pre></details><h3 className="supplement-heading">AI解析用の補助画像</h3><div className="frame-grid">{analysisResult.frames.map((frame) => <figure key={frame.fileName}><img src={frame.previewUrl} alt={`${frame.timeLabel}時点の補助画像`} onLoad={(event) => { if (!event.currentTarget.naturalWidth || !event.currentTarget.naturalHeight) setAnalysisMessage('補助画像を正常に表示できませんでした。') }} onError={() => setAnalysisMessage('補助画像を読み込めませんでした。')} /><figcaption><span>{frame.timeLabel}</span><button type="button" onClick={() => downloadBlob(frame.blob, frame.fileName)}>PNG保存</button></figcaption></figure>)}</div></div>}</section>
       <footer><p>録画データを外部へ自動送信しません</p><p>対応環境：Windows版 Google Chrome / Microsoft Edge</p></footer>

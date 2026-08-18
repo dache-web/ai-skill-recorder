@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildAnalysisDocument } from './analysisPackage'
 import { calculateFrameTimes, frameFileName, MAX_FRAME_COUNT } from './frameExtractor'
 import { analysisJson } from './export'
-import { createSegment, normalizeTime, overlappingSegmentIds, pointFileName, segmentsOverlap } from './reviewAnnotations'
+import { createSegment, hasReachedSegmentEnd, normalizeTime, overlappingSegmentIds, pointFileName, segmentsOverlap } from './reviewAnnotations'
 
 describe('STEP2-1 analysis helpers', () => {
   it('5秒間隔で動画末尾を超えない時刻を作る', () => {
@@ -65,5 +65,11 @@ describe('STEP2-1 analysis helpers', () => {
     const excluded = createSegment('excluded-1', 1, 80, 85)
     expect(segmentsOverlap(video, excluded)).toBe(true)
     expect([...overlappingSegmentIds([video], [excluded])]).toEqual(['video-1', 'excluded-1'])
+  })
+
+  it('確認再生が指定区間の終了位置へ達したことを判定する', () => {
+    expect(hasReachedSegmentEnd(19.999, 20)).toBe(false)
+    expect(hasReachedSegmentEnd(20, 20)).toBe(true)
+    expect(hasReachedSegmentEnd(20.1, 20)).toBe(true)
   })
 })

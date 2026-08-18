@@ -1,36 +1,29 @@
 import { formatElapsed } from '../recorder'
+import { captureVideoFrame } from './frameExtractor'
 import type { ReviewPoint, ReviewPointData, ReviewSegment } from './types'
 
 export const MAX_POINT_COUNT = 30
 
-export const normalizeTime = (timeSeconds: number, durationSeconds: number): number =>
-  Number(Math.min(Math.max(0, timeSeconds), Math.max(0, durationSeconds)).toFixed(3))
+export const normalizeTime = (timeSeconds: number, durationSeconds?: number): number => {
+  const safeTime = Math.max(0, timeSeconds)
+  const boundedTime = Number.isFinite(durationSeconds) && durationSeconds! > 0
+    ? Math.min(safeTime, durationSeconds!)
+    : safeTime
+  return Number(boundedTime.toFixed(3))
+}
 
 export const pointFileName = (sequence: number): string =>
   `point_${String(sequence).padStart(3, '0')}.png`
 
-const canvasToPng = (canvas: HTMLCanvasElement): Promise<Blob> =>
-  new Promise((resolve, reject) => canvas.toBlob(
-    (blob) => blob ? resolve(blob) : reject(new Error('ポイント画像を生成できませんでした。')),
-    'image/png',
-  ))
-
 export const captureReviewPoint = async (
   video: HTMLVideoElement,
   sequence: number,
+  timeSeconds: number,
 ): Promise<ReviewPoint> => {
-  if (!Number.isFinite(video.duration) || video.duration <= 0 || !video.videoWidth || !video.videoHeight) {
+  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) {
     throw new Error('動画の読み込み完了後にポイントを追加してください。')
   }
-  const timeSeconds = normalizeTime(video.currentTime, video.duration)
-  const scale = Math.min(1, 1280 / video.videoWidth)
-  const canvas = document.createElement('canvas')
-  canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
-  canvas.height = Math.max(1, Math.round(video.videoHeight * scale))
-  const context = canvas.getContext('2d')
-  if (!context) throw new Error('ポイント画像生成用Canvasを利用できません。')
-  context.drawImage(video, 0, 0, canvas.width, canvas.height)
-  const blob = await canvasToPng(canvas)
+  const blob = await captureVideoFrame(video)
   return {
     id: `point-${sequence}`,
     order: 0,

@@ -49,7 +49,19 @@ const loadVideo = async (url: string): Promise<HTMLVideoElement> => {
   return video
 }
 
-const seek = async (video: HTMLVideoElement, timeSeconds: number): Promise<void> => {
+const waitForDecodedFrame = async (video: HTMLVideoElement): Promise<void> => {
+  if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) await waitForEvent(video, 'loadeddata')
+  if (!video.videoWidth || !video.videoHeight) throw new Error('描画可能な動画フレームを取得できませんでした。')
+  await new Promise<void>((resolve) => {
+    let settled = false
+    const finish = () => { if (!settled) { settled = true; window.clearTimeout(timeout); resolve() } }
+    const timeout = window.setTimeout(finish, 1000)
+    if ('requestVideoFrameCallback' in video) video.requestVideoFrameCallback(() => finish())
+    else window.requestAnimationFrame(() => window.requestAnimationFrame(finish))
+  })
+}
+
+export const seekToFrame = async (video: HTMLVideoElement, timeSeconds: number): Promise<void> => {
   if (Math.abs(video.currentTime - timeSeconds) < 0.01 && video.readyState >= 2) return
   const completed = waitForEvent(video, 'seeked')
   video.currentTime = timeSeconds
@@ -65,7 +77,7 @@ const resolveDuration = async (video: HTMLVideoElement, durationHint?: number): 
     await durationChanged
     if (Number.isFinite(video.duration) && video.duration > 0) {
       const duration = video.duration
-      await seek(video, 0)
+      await seekToFrame(video, 0)
       return duration
     }
   } catch {
@@ -80,6 +92,20 @@ const canvasToPng = (canvas: HTMLCanvasElement): Promise<Blob> =>
     'image/png',
   ))
 
+export const captureVideoFrame = async (video: HTMLVideoElement): Promise<Blob> => {
+  await waitForDecodedFrame(video)
+  const scale = Math.min(1, 1280 / video.videoWidth)
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale))
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('静止画生成用Canvasを利用できません。')
+  context.drawImage(video, 0, 0, canvas.width, canvas.height)
+  const blob = await canvasToPng(canvas)
+  if (blob.size <= 0 || blob.type !== 'image/png') throw new Error('正常なPNG画像を生成できませんでした。')
+  return blob
+}
+
 export const extractFrames = async (
   blob: Blob,
   intervalSeconds: number,
@@ -93,17 +119,10 @@ export const extractFrames = async (
     const height = video.videoHeight
     if (!width || !height) throw new Error('映像トラックを確認できませんでした。')
     const { times, effectiveIntervalSeconds } = calculateFrameTimes(duration, intervalSeconds)
-    const scale = Math.min(1, 1280 / width)
-    const canvas = document.createElement('canvas')
-    canvas.width = Math.max(1, Math.round(width * scale))
-    canvas.height = Math.max(1, Math.round(height * scale))
-    const context = canvas.getContext('2d')
-    if (!context) throw new Error('静止画生成用Canvasを利用できません。')
     const frames: ExtractedFrame[] = []
     for (const timeSeconds of times) {
-      await seek(video, Math.min(timeSeconds, Math.max(0, duration - 0.001)))
-      context.drawImage(video, 0, 0, canvas.width, canvas.height)
-      const frameBlob = await canvasToPng(canvas)
+      await seekToFrame(video, Math.min(timeSeconds, Math.max(0, duration - 0.001)))
+      const frameBlob = await captureVideoFrame(video)
       frames.push({
         timeSeconds,
         timeLabel: formatElapsed(Math.floor(timeSeconds)),

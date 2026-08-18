@@ -44,6 +44,8 @@ describe('STEP2-1 analysis helpers', () => {
     expect(normalizeTime(5.1239, 10)).toBe(5.124)
     expect(normalizeTime(-1, 10)).toBe(0)
     expect(normalizeTime(12, 10)).toBe(10)
+    expect(normalizeTime(5.1239, Number.POSITIVE_INFINITY)).toBe(5.124)
+    expect(normalizeTime(5.1239)).toBe(5.124)
   })
 
   it('ポイントPNG名を連番で作る', () => {

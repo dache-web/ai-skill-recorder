@@ -7,10 +7,10 @@ export type PlacementTool = 'ellipse' | 'rectangle' | 'arrow' | 'text'
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value))
 
 const INITIAL_SIZES: Record<PlacementTool, { width: number; height: number }> = {
-  ellipse: { width: .12, height: .1 },
-  rectangle: { width: .14, height: .1 },
-  arrow: { width: .18, height: .08 },
-  text: { width: .22, height: .1 },
+  ellipse: { width: .08, height: .07 },
+  rectangle: { width: .1, height: .07 },
+  arrow: { width: .12, height: .06 },
+  text: { width: .14, height: .07 },
 }
 
 export const placementGeometry = (tool: PlacementTool, normalizedX: number, normalizedY: number): AnnotationGeometry => {

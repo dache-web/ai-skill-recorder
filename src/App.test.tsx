@@ -23,6 +23,14 @@ const addSegment = async (video: HTMLVideoElement, kind: '動画区間' | '削�
 }
 
 describe('unified review timeline', () => {
+  it('編集対象とOverlay実寸がそろうまで編集ツールを無効化し自動で有効化する', async () => {
+    render(<App />); const video = selectReadyVideo()
+    expect(screen.getByRole('button', { name: 'T' })).toBeDisabled()
+    expect(screen.getByText('編集する項目を下のタイムラインから選択してください。')).toBeInTheDocument()
+    await addSegment(video, '動画区間', 2, 5)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'T' })).toBeEnabled())
+    expect(screen.getByText('図形・文字・画像を追加できます。')).toBeInTheDocument()
+  })
   beforeEach(() => { localStorage.clear(); vi.stubGlobal('PointerEvent', MouseEvent); vi.stubGlobal('URL', { createObjectURL: vi.fn(() => `blob:review-${Math.random()}`), revokeObjectURL: vi.fn() }); vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D); vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(new Blob(['png'], { type: 'image/png' }))); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined) })
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -60,7 +68,7 @@ describe('unified review timeline', () => {
     render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('図形'))
     const layer = document.querySelector('.annotation-layer') as HTMLElement; Object.defineProperty(layer, 'getBoundingClientRect', { configurable: true, value: vi.fn(() => ({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })) })
     for (const [name, x] of [['○', 200], ['□', 500], ['矢印', 800]] as const) { fireEvent.click(screen.getByRole('button', { name })); fireEvent.pointerDown(layer, { pointerId: 1, clientX: x, clientY: 250 }) }
-    expect(document.querySelectorAll('.annotation-object')).toHaveLength(3); const positions = Array.from(document.querySelectorAll<HTMLElement>('.annotation-object')).map((item) => Number.parseFloat(item.style.left)); expect(positions[0]).toBeCloseTo(14); expect(positions[1]).toBeCloseTo(43); expect(positions[2]).toBeCloseTo(71)
+    expect(document.querySelectorAll('.annotation-object')).toHaveLength(3); const positions = Array.from(document.querySelectorAll<HTMLElement>('.annotation-object')).map((item) => Number.parseFloat(item.style.left)); expect(positions[0]).toBeCloseTo(16); expect(positions[1]).toBeCloseTo(45); expect(positions[2]).toBeCloseTo(74)
   })
 
   it('1回の直接ドラッグをUndo 1回で元へ戻す', async () => {
@@ -69,7 +77,29 @@ describe('unified review timeline', () => {
     const layer = document.querySelector('.annotation-layer') as HTMLElement; vi.spyOn(layer, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })
     const annotation = screen.getByRole('button', { name: 'text注釈を選択・移動' }); Object.assign(annotation, { setPointerCapture: vi.fn(), hasPointerCapture: vi.fn(() => false), releasePointerCapture: vi.fn() })
     fireEvent.pointerDown(annotation, { pointerId: 1, clientX: 200, clientY: 100 }); fireEvent.pointerMove(annotation, { pointerId: 1, clientX: 300, clientY: 150 }); fireEvent.pointerUp(annotation, { pointerId: 1, clientX: 300, clientY: 150 })
-    expect(Number.parseFloat((annotation.parentElement as HTMLElement).style.left)).toBeCloseTo(29); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect((annotation.parentElement as HTMLElement).style.left).toBe('19%')
+    expect(Number.parseFloat((annotation.parentElement as HTMLElement).style.left)).toBeCloseTo(33); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect((annotation.parentElement as HTMLElement).style.left).toBe('23%')
+  })
+
+  it('Overlay管理の四隅リサイズをドラッグ中に反映し1回のUndoで戻す', async () => {
+    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); placeText()
+    const input = screen.getByRole('textbox', { name: '大画面上の文字入力' }); fireEvent.keyDown(input, { key: 'Enter' })
+    const layer = document.querySelector('.annotation-layer') as HTMLElement
+    vi.spyOn(layer, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })
+    Object.assign(layer, { setPointerCapture: vi.fn(), hasPointerCapture: vi.fn(() => false), releasePointerCapture: vi.fn() })
+    const object = document.querySelector('.annotation-object') as HTMLElement; const before = object.style.width
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'seハンドルでサイズ変更' }), { pointerId: 7, clientX: 300, clientY: 150 })
+    fireEvent.pointerMove(layer, { pointerId: 7, clientX: 400, clientY: 200 })
+    expect(Number.parseFloat(object.style.width)).toBeGreaterThan(Number.parseFloat(before))
+    fireEvent.pointerUp(layer, { pointerId: 7, clientX: 400, clientY: 200 })
+    fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(object.style.width).toBe(before)
+  })
+
+  it('pointからvideoへ戻しても同じvideo要素を維持する', async () => {
+    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5)
+    video.currentTime = 7; fireEvent.click(screen.getByRole('button', { name: '★ ポイント' })); await waitFor(() => expect(screen.getByText('2. ★ポイント')).toBeInTheDocument())
+    fireEvent.click(screen.getByText('2. ★ポイント')); await waitFor(() => expect(video.style.display).toBe('none'))
+    fireEvent.click(screen.getByText('1. 動画')); await waitFor(() => expect(video.style.display).toBe('block'))
+    expect(document.querySelector('.review-player')).toBe(video); expect(video.currentTime).toBe(2)
   })
 
   it('タイムラインを横並び専用コンテナに表示し選択項目を明示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); expect(document.querySelector('.timeline-strip')).toBeInTheDocument(); expect(screen.getByText('編集中')).toBeInTheDocument(); expect(screen.getByRole('button', { name: '次の項目 →' })).toBeInTheDocument() })

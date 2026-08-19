@@ -5,10 +5,11 @@ const geometry = { x: .3, y: .3, width: .2, height: .1, rotationDegrees: 0 }
 
 describe('annotation direct interaction', () => {
   it('クリック位置を中心に配置し画面端ではclampする', () => {
-    expect(placementGeometry('ellipse', .5, .5)).toEqual({ x: .44, y: .45, width: .12, height: .1, rotationDegrees: 0 })
+    expect(placementGeometry('ellipse', .5, .5)).toMatchObject({ x: .46, width: .08, height: .07, rotationDegrees: 0 })
+    expect(placementGeometry('ellipse', .5, .5).y).toBeCloseTo(.465)
     const arrow = placementGeometry('arrow', .99, .01)
-    expect(arrow).toMatchObject({ y: 0, width: .18, height: .08, rotationDegrees: 0 })
-    expect(arrow.x).toBeCloseTo(.82)
+    expect(arrow).toMatchObject({ y: 0, width: .12, height: .06, rotationDegrees: 0 })
+    expect(arrow.x).toBeCloseTo(.88)
   })
   it('移動量を正規化座標へ反映し画面内へ制限する', () => {
     const moved = moveAnnotationGeometry(geometry, .1, -.1)

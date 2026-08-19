@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
 const selectReadyVideo = (beforeReady?: (video: HTMLVideoElement) => void) => {
-  fireEvent.change(screen.getByLabelText('ファイルを選択'), { target: { files: [new File(['webm'], 'review.webm', { type: 'video/webm' })] } })
+  fireEvent.change(screen.getByLabelText('録画ファイルを開く'), { target: { files: [new File(['webm'], 'review.webm', { type: 'video/webm' })] } })
   const video = document.querySelector('.review-player') as HTMLVideoElement
   let paused = true; let currentTime = 0
   Object.defineProperties(video, { readyState: { configurable: true, value: 2 }, videoWidth: { configurable: true, value: 1280 }, videoHeight: { configurable: true, value: 720 }, duration: { configurable: true, value: 120 }, currentTime: { configurable: true, get: () => currentTime, set: (value: number) => { currentTime = value; queueMicrotask(() => fireEvent.seeked(video)) } }, paused: { configurable: true, get: () => paused }, requestVideoFrameCallback: { configurable: true, value: (callback: VideoFrameRequestCallback) => { callback(0, {} as VideoFrameCallbackMetadata); return 1 } } })
@@ -65,7 +65,7 @@ describe('unified review timeline', () => {
 
   it('注釈追加とUndo/Redoを同じ項目に適用する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); placeText(); expect(document.querySelectorAll('.annotation')).toHaveLength(1); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(document.querySelectorAll('.annotation')).toHaveLength(0); fireEvent.click(screen.getByRole('button', { name: '↷ 進む' })); expect(document.querySelectorAll('.annotation')).toHaveLength(1) })
 
-  it('編集ツール選択で動画を止め、大画面クリック後にハンドルを表示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); await video.play(); const before = video.currentTime; placeText(); expect(video.pause).toHaveBeenCalled(); expect(video.currentTime).toBe(before); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4); expect(screen.getByRole('button', { name: '選択中の注釈を削除' })).toBeInTheDocument(); expect(screen.queryByText('注意')).not.toBeInTheDocument() })
+  it('編集ツール選択で動画を止め、文字確定後にハンドルを表示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); await video.play(); const before = video.currentTime; placeText(); expect(video.pause).toHaveBeenCalled(); expect(video.currentTime).toBe(before); fireEvent.keyDown(screen.getByRole('textbox', { name: '大画面上の文字入力' }), { key: 'Enter' }); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4); expect(screen.getByRole('button', { name: '選択中の注釈を削除' })).toBeInTheDocument(); expect(screen.queryByText('注意')).not.toBeInTheDocument() })
 
   it('○・□・矢印を選んだ位置へ配置する', async () => {
     render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('図形'))
@@ -97,6 +97,16 @@ describe('unified review timeline', () => {
     fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(object.style.width).toBe(before)
   })
 
+  it('文字リサイズで実フォントサイズを変更しUndoとRedoで復元する', async () => {
+    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); placeText()
+    const input = screen.getByRole('textbox', { name: '大画面上の文字入力' }); fireEvent.change(input, { target: { value: '拡大文字' } }); fireEvent.keyDown(input, { key: 'Enter' })
+    const layer = document.querySelector('.annotation-layer') as HTMLElement; vi.spyOn(layer, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })
+    const handle = screen.getByRole('button', { name: 'seハンドルでサイズ変更' }); fireEvent.pointerDown(handle, { pointerId: 12, clientX: 300, clientY: 150 }); fireEvent.pointerMove(layer, { pointerId: 12, clientX: 500, clientY: 250 }); fireEvent.pointerUp(layer, { pointerId: 12, clientX: 500, clientY: 250 })
+    const resizedFontSize = (screen.getByRole('button', { name: 'text注釈を選択・移動' }) as HTMLElement).style.fontSize; expect(Number.parseFloat(resizedFontSize)).toBeGreaterThan(34)
+    fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(screen.getByRole('button', { name: 'text注釈を選択・移動' })).toHaveStyle({ fontSize: '34px' })
+    fireEvent.click(screen.getByRole('button', { name: '↷ 進む' })); expect(screen.getByRole('button', { name: 'text注釈を選択・移動' })).toHaveStyle({ fontSize: resizedFontSize })
+  })
+
   it('pointからvideoへ戻しても同じvideo要素を維持する', async () => {
     render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5)
     video.currentTime = 7; fireEvent.click(screen.getByRole('button', { name: '★ ポイント' })); await waitFor(() => expect(screen.getByText('2. ★ポイント')).toBeInTheDocument())
@@ -107,9 +117,26 @@ describe('unified review timeline', () => {
 
   it('元動画と編集表示を区別しseekしても表示モードを維持する', () => {
     render(<App />); const video = selectReadyVideo(); placeText(); expect(screen.getByText('編集中プレビュー')).toBeInTheDocument(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
-    fireEvent.click(screen.getByRole('button', { name: '元動画' })); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('元動画'); expect(document.querySelectorAll('.annotation-object')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: '元動画を確認' })); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('元動画'); expect(document.querySelectorAll('.annotation-object')).toHaveLength(0)
     video.currentTime = 9; fireEvent.seeking(video); fireEvent.timeUpdate(video); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('元動画')
-    fireEvent.click(screen.getByRole('button', { name: '編集表示' })); expect(screen.getByText('編集中プレビュー')).toBeInTheDocument(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '編集中の画面' })); expect(screen.getByText('編集中プレビュー')).toBeInTheDocument(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
+  })
+
+  it('選択項目の元時刻へ移動し挿入ページでは直前の元時刻を使う', async () => {
+    vi.spyOn(window, 'prompt').mockReturnValue('章'); render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 12, 16)
+    fireEvent.click(screen.getByRole('button', { name: 'タイトル追加' })); fireEvent.click(screen.getByText('2. タイトル')); video.currentTime = 70
+    fireEvent.click(screen.getByRole('button', { name: '元動画を確認' })); await waitFor(() => expect(video.currentTime).toBe(12)); expect(screen.getByText('2. タイトル').closest('.timeline-item')).toHaveAttribute('aria-current', 'true')
+    fireEvent.click(screen.getByRole('button', { name: '編集中の画面' })); await waitFor(() => expect(document.querySelector('.view-mode-badge')).toHaveTextContent('タイトル'))
+  })
+
+  it('ポイント選択時はポイント時刻の元動画へ移動する', async () => {
+    render(<App />); const video = selectReadyVideo(); video.currentTime = 35; fireEvent.click(screen.getByRole('button', { name: '★ ポイント' })); await waitFor(() => expect(screen.getByText('1. ★ポイント')).toBeInTheDocument()); fireEvent.click(screen.getByText('1. ★ポイント')); video.currentTime = 80
+    fireEvent.click(screen.getByRole('button', { name: '元動画を確認' })); await waitFor(() => expect(video.currentTime).toBe(35)); expect(screen.getByText('1. ★ポイント').closest('.timeline-item')).toHaveAttribute('aria-current', 'true')
+  })
+
+  it('参照元のない先頭挿入ページは元動画の0秒へ勝手に移動しない', () => {
+    vi.spyOn(window, 'prompt').mockReturnValue('先頭'); render(<App />); const video = selectReadyVideo(); video.currentTime = 55; fireEvent.click(screen.getByRole('button', { name: 'タイトル追加' })); fireEvent.click(screen.getByText('1. タイトル'))
+    fireEvent.click(screen.getByRole('button', { name: '元動画を確認' })); expect(video.currentTime).toBe(55); expect(screen.getByText('このページには参照できる元動画位置がありません。表示位置は変更していません。')).toBeInTheDocument(); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('タイトル')
   })
 
   it('作業JSONへ編集状態とWebM metadataを保存しWebM本体を含めない', async () => {
@@ -133,7 +160,14 @@ describe('unified review timeline', () => {
 
   it('画像を読み込むと中央へ追加し即選択する', async () => {
     class LoadedImage { naturalWidth = 800; naturalHeight = 400; onload: null | (() => void) = null; onerror: null | (() => void) = null; set src(_value: string) { queueMicrotask(() => this.onload?.()) } }
-    vi.stubGlobal('Image', LoadedImage); render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('画像')); fireEvent.click(screen.getByRole('button', { name: '画面に追加' })); const input = document.querySelector('input[accept="image/png,image/jpeg,image/webp"]') as HTMLInputElement; fireEvent.change(input, { target: { files: [new File(['png'], 'sample.png', { type: 'image/png' })] } }); await waitFor(() => expect(screen.getByAltText('重ね画像')).toBeInTheDocument()); expect(document.querySelector('.annotation-object.selected')).toBeInTheDocument(); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4)
+    vi.stubGlobal('Image', LoadedImage); render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('画像')); fireEvent.click(screen.getByRole('button', { name: '今の画面に画像を追加' })); const input = document.querySelector('input[accept="image/png,image/jpeg,image/webp"]') as HTMLInputElement; fireEvent.change(input, { target: { files: [new File(['png'], 'sample.png', { type: 'image/png' })] } }); await waitFor(() => expect(screen.getByAltText('重ね画像')).toBeInTheDocument()); expect(document.querySelector('.annotation-object.selected')).toBeInTheDocument(); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4)
+  })
+
+  it('タイムライン未作成の動画画面でも画像選択を開き重ね画像を追加する', async () => {
+    class LoadedImage { naturalWidth = 640; naturalHeight = 360; onload: null | (() => void) = null; onerror: null | (() => void) = null; set src(_value: string) { queueMicrotask(() => this.onload?.()) } }
+    vi.stubGlobal('Image', LoadedImage); render(<App />); selectReadyVideo(); const input = document.querySelector('input[accept="image/png,image/jpeg,image/webp"]') as HTMLInputElement; const clickSpy = vi.spyOn(input, 'click')
+    fireEvent.click(screen.getByText('画像')); fireEvent.click(screen.getByRole('button', { name: '今の画面に画像を追加' })); expect(clickSpy).toHaveBeenCalledOnce()
+    fireEvent.change(input, { target: { files: [new File(['png'], 'initial.png', { type: 'image/png' })] } }); await waitFor(() => expect(screen.getByAltText('重ね画像')).toBeInTheDocument()); expect(document.querySelectorAll('.timeline-item')).toHaveLength(0)
   })
 
   it('現在の動画フレーム保存は再生位置と編集履歴を変えない', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 6, 9); video.currentTime = 7; fireEvent.timeUpdate(video); const undo = screen.getByRole('button', { name: '↶ 戻す' }); const undoEnabledBefore = !undo.hasAttribute('disabled'); fireEvent.click(screen.getByRole('button', { name: '画像を保存' })); await waitFor(() => expect(screen.getByText('現在表示中の完成画面をPNGで保存しました。')).toBeInTheDocument()); expect(video.currentTime).toBe(7); expect(!undo.hasAttribute('disabled')).toBe(undoEnabledBefore) })

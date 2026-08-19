@@ -115,7 +115,7 @@ describe('unified review timeline', () => {
   it('作業JSONへ編集状態とWebM metadataを保存しWebM本体を含めない', async () => {
     render(<App />); selectReadyVideo(); placeText(); fireEvent.click(screen.getByRole('button', { name: '作業を保存' }))
     await waitFor(() => expect(screen.getByText(/作業データを保存しました/)).toBeInTheDocument())
-    const jsonBlob = vi.mocked(URL.createObjectURL).mock.calls.map(([blob]) => blob).findLast((blob) => blob instanceof Blob && blob.type === 'application/json') as Blob
+    const jsonBlob = [...vi.mocked(URL.createObjectURL).mock.calls].reverse().map(([blob]) => blob).find((blob): blob is Blob => blob instanceof Blob && blob.type === 'application/json') as Blob
     const project = JSON.parse(await readBlob(jsonBlob)); expect(project.schemaVersion).toBe('step2-1-editor-project-1'); expect(project.editor.annotations).toHaveLength(1); expect(project.editor.viewMode).toBe('editing-preview'); expect(project.originalWebM).toMatchObject({ fileName: 'review.webm', immutableSource: true, embedded: false }); expect(project.originalWebM.blob).toBeUndefined()
   })
 

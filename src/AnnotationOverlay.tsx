@@ -4,10 +4,10 @@ import { moveAnnotationGeometry, resizeAnnotationGeometry, type PlacementTool, t
 
 type RuntimeAsset = { data: { id: string }; previewUrl: string }
 export type OverlayMetrics = { mounted: boolean; width: number; height: number }
-type Interaction = { annotationId: string; annotationType: Annotation['type']; mode: 'move' | 'resize'; corner?: ResizeCorner; pointerId: number; startX: number; startY: number; geometry: Annotation['geometry']; historyStarted: boolean }
+type Interaction = { annotationId: string; annotationType: Annotation['type']; mode: 'move' | 'resize'; corner?: ResizeCorner; pointerId: number; startX: number; startY: number; geometry: Annotation['geometry']; historyStarted: boolean; removeWindowListeners?: () => void }
 type Props = { annotations: Annotation[]; assets: RuntimeAsset[]; selectedId: string | null; onSelect: (id: string | null) => void; onInteractionStart: () => void; onGeometryChange: (id: string, geometry: Annotation['geometry']) => void; onInteractionEnd: () => void; onDelete: (id: string) => void; placementTool: PlacementTool | null; onPlace: (tool: PlacementTool, normalizedX: number, normalizedY: number) => void; onTextChange: (id: string, text: string) => void; onTextCommit: () => void; editingTextId: string | null; onMetricsChange: (metrics: OverlayMetrics) => void }
 
-const annotationLabel = (annotation: Annotation) => annotation.type === 'ellipse' ? '○' : annotation.type === 'rectangle' ? '□' : annotation.type === 'arrow' ? '➜' : annotation.type === 'line' ? '―' : annotation.type === 'text' ? annotation.text || '' : annotation.text || (annotation.type === 'check' ? '✓' : '1')
+const annotationLabel = (annotation: Annotation) => annotation.type === 'ellipse' || annotation.type === 'rectangle' || annotation.type === 'arrow' ? '' : annotation.type === 'line' ? '―' : annotation.type === 'text' ? annotation.text || '' : annotation.text || (annotation.type === 'check' ? '✓' : '1')
 
 export default function AnnotationOverlay({ annotations, assets, selectedId, onSelect, onInteractionStart, onGeometryChange, onInteractionEnd, onDelete, placementTool, onPlace, onTextChange, onTextCommit, editingTextId, onMetricsChange }: Props) {
   const layerRef = useRef<HTMLDivElement>(null)
@@ -21,32 +21,37 @@ export default function AnnotationOverlay({ annotations, assets, selectedId, onS
     report(bounds.width, bounds.height)
     const observer = new ResizeObserver((entries) => { const entry = entries[0]; if (entry) report(entry.contentRect.width, entry.contentRect.height) })
     observer.observe(layer)
-    return () => { observer.disconnect(); onMetricsChange({ mounted: false, width: 0, height: 0 }) }
+    return () => { observer.disconnect(); interactionRef.current?.removeWindowListeners?.(); interactionRef.current = null; onMetricsChange({ mounted: false, width: 0, height: 0 }) }
   }, [onMetricsChange])
 
   const finishInteraction = (pointerId: number, releaseCapture = true) => {
     const interaction = interactionRef.current; const layer = layerRef.current
     if (!interaction || interaction.pointerId !== pointerId) return
     interactionRef.current = null
+    interaction.removeWindowListeners?.()
     if (releaseCapture && layer?.hasPointerCapture?.(pointerId)) layer.releasePointerCapture(pointerId)
     if (interaction.historyStarted) onInteractionEnd()
   }
-  const startInteraction = (event: ReactPointerEvent<HTMLElement>, annotation: Annotation, mode: 'move' | 'resize', corner?: ResizeCorner) => {
-    event.preventDefault(); event.stopPropagation(); onSelect(annotation.id)
-    interactionRef.current = { annotationId: annotation.id, annotationType: annotation.type, mode, corner, pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, geometry: annotation.geometry, historyStarted: false }
-    layerRef.current?.setPointerCapture?.(event.pointerId)
-  }
-  const continueInteraction = (event: ReactPointerEvent<HTMLDivElement>) => {
+  const continueInteractionAt = (pointerId: number, clientX: number, clientY: number) => {
     const interaction = interactionRef.current; const layer = layerRef.current
-    if (!interaction || interaction.pointerId !== event.pointerId || !layer) return
+    if (!interaction || interaction.pointerId !== pointerId || !layer) return
     const bounds = layer.getBoundingClientRect(); if (!bounds.width || !bounds.height) return
-    const deltaX = (event.clientX - interaction.startX) / bounds.width; const deltaY = (event.clientY - interaction.startY) / bounds.height
+    const deltaX = (clientX - interaction.startX) / bounds.width; const deltaY = (clientY - interaction.startY) / bounds.height
     if (!interaction.historyStarted && (Math.abs(deltaX) > .001 || Math.abs(deltaY) > .001)) { onInteractionStart(); interaction.historyStarted = true }
     if (!interaction.historyStarted) return
     onGeometryChange(interaction.annotationId, interaction.mode === 'move' ? moveAnnotationGeometry(interaction.geometry, deltaX, deltaY) : resizeAnnotationGeometry(interaction.geometry, interaction.corner ?? 'se', deltaX, deltaY, interaction.annotationType === 'image'))
   }
+  const startInteraction = (event: ReactPointerEvent<HTMLElement>, annotation: Annotation, mode: 'move' | 'resize', corner?: ResizeCorner) => {
+    event.preventDefault(); event.stopPropagation(); onSelect(annotation.id)
+    const pointerId = event.pointerId
+    const move = (nativeEvent: PointerEvent) => continueInteractionAt(nativeEvent.pointerId, nativeEvent.clientX, nativeEvent.clientY)
+    const finish = (nativeEvent: PointerEvent) => finishInteraction(nativeEvent.pointerId)
+    const removeWindowListeners = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish) }
+    interactionRef.current = { annotationId: annotation.id, annotationType: annotation.type, mode, corner, pointerId, startX: event.clientX, startY: event.clientY, geometry: annotation.geometry, historyStarted: false, removeWindowListeners }
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', finish); window.addEventListener('pointercancel', finish)
+  }
 
-  return <div ref={layerRef} className={`annotation-layer ${placementTool ? 'is-placing' : ''}`} onPointerMove={continueInteraction} onPointerUp={(event) => finishInteraction(event.pointerId)} onPointerCancel={(event) => finishInteraction(event.pointerId)} onLostPointerCapture={(event) => finishInteraction(event.pointerId, false)} onPointerDown={(event) => {
+  return <div ref={layerRef} className={`annotation-layer ${placementTool ? 'is-placing' : ''}`} onPointerMove={(event) => continueInteractionAt(event.pointerId, event.clientX, event.clientY)} onPointerUp={(event) => finishInteraction(event.pointerId)} onPointerCancel={(event) => finishInteraction(event.pointerId)} onLostPointerCapture={(event) => finishInteraction(event.pointerId, false)} onPointerDown={(event) => {
     if (event.target !== event.currentTarget) return
     if (!placementTool) { onSelect(null); return }
     const bounds = event.currentTarget.getBoundingClientRect(); if (!bounds.width || !bounds.height) return

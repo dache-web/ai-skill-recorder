@@ -2,12 +2,12 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
-const selectReadyVideo = () => {
+const selectReadyVideo = (beforeReady?: (video: HTMLVideoElement) => void) => {
   fireEvent.change(screen.getByLabelText('ファイルを選択'), { target: { files: [new File(['webm'], 'review.webm', { type: 'video/webm' })] } })
   const video = document.querySelector('.review-player') as HTMLVideoElement
   let paused = true; let currentTime = 0
   Object.defineProperties(video, { readyState: { configurable: true, value: 2 }, videoWidth: { configurable: true, value: 1280 }, videoHeight: { configurable: true, value: 720 }, duration: { configurable: true, value: 120 }, currentTime: { configurable: true, get: () => currentTime, set: (value: number) => { currentTime = value; queueMicrotask(() => fireEvent.seeked(video)) } }, paused: { configurable: true, get: () => paused }, requestVideoFrameCallback: { configurable: true, value: (callback: VideoFrameRequestCallback) => { callback(0, {} as VideoFrameCallbackMetadata); return 1 } } })
-  video.play = vi.fn(async () => { paused = false; fireEvent.play(video) }); video.pause = vi.fn(() => { paused = true; fireEvent.pause(video) })
+  video.play = vi.fn(async () => { paused = false; fireEvent.play(video) }); video.pause = vi.fn(() => { paused = true; fireEvent.pause(video) }); beforeReady?.(video)
   fireEvent.loadedMetadata(video); fireEvent.loadedData(video); return video
 }
 const placeText = (clientX = 300, clientY = 150) => {
@@ -21,15 +21,18 @@ const addSegment = async (video: HTMLVideoElement, kind: '動画区間' | '削�
   video.currentTime = end; fireEvent.click(screen.getByRole('button', { name: `${kind} 終了` })); await waitFor(() => expect(screen.getByRole('button', { name: '▶ 動画を再開' })).toBeInTheDocument())
   fireEvent.click(screen.getByRole('button', { name: '▶ 動画を再開' })); await waitFor(() => expect(screen.getByRole('button', { name: `${kind} 開始` })).toBeInTheDocument())
 }
+const readBlob = (blob: Blob) => new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(reader.error); reader.readAsText(blob) })
 
 describe('unified review timeline', () => {
   it('編集対象とOverlay実寸がそろうまで編集ツールを無効化し自動で有効化する', async () => {
-    render(<App />); const video = selectReadyVideo()
-    expect(screen.getByRole('button', { name: 'T' })).toBeDisabled()
-    expect(screen.getByText('編集する項目を下のタイムラインから選択してください。')).toBeInTheDocument()
-    await addSegment(video, '動画区間', 2, 5)
+    render(<App />)
+    selectReadyVideo(() => { expect(screen.getByRole('button', { name: 'T' })).toBeDisabled(); expect(screen.getByText('編集画面を準備しています…')).toBeInTheDocument() })
     await waitFor(() => expect(screen.getByRole('button', { name: 'T' })).toBeEnabled())
     expect(screen.getByText('図形・文字・画像を追加できます。')).toBeInTheDocument()
+  })
+
+  it('seekやtimeupdateなしで初回Annotationを配置できる', () => {
+    render(<App />); selectReadyVideo(); placeText(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
   })
   beforeEach(() => { localStorage.clear(); vi.stubGlobal('PointerEvent', MouseEvent); vi.stubGlobal('URL', { createObjectURL: vi.fn(() => `blob:review-${Math.random()}`), revokeObjectURL: vi.fn() }); vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage: vi.fn() } as unknown as CanvasRenderingContext2D); vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation((callback) => callback(new Blob(['png'], { type: 'image/png' }))); vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined) })
   afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
@@ -100,6 +103,28 @@ describe('unified review timeline', () => {
     fireEvent.click(screen.getByText('2. ★ポイント')); await waitFor(() => expect(video.style.display).toBe('none'))
     fireEvent.click(screen.getByText('1. 動画')); await waitFor(() => expect(video.style.display).toBe('block'))
     expect(document.querySelector('.review-player')).toBe(video); expect(video.currentTime).toBe(2)
+  })
+
+  it('元動画と編集表示を区別しseekしても表示モードを維持する', () => {
+    render(<App />); const video = selectReadyVideo(); placeText(); expect(screen.getByText('編集中プレビュー')).toBeInTheDocument(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: '元動画' })); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('元動画'); expect(document.querySelectorAll('.annotation-object')).toHaveLength(0)
+    video.currentTime = 9; fireEvent.seeking(video); fireEvent.timeUpdate(video); expect(document.querySelector('.view-mode-badge')).toHaveTextContent('元動画')
+    fireEvent.click(screen.getByRole('button', { name: '編集表示' })); expect(screen.getByText('編集中プレビュー')).toBeInTheDocument(); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1)
+  })
+
+  it('作業JSONへ編集状態とWebM metadataを保存しWebM本体を含めない', async () => {
+    render(<App />); selectReadyVideo(); placeText(); fireEvent.click(screen.getByRole('button', { name: '作業を保存' }))
+    await waitFor(() => expect(screen.getByText(/作業データを保存しました/)).toBeInTheDocument())
+    const jsonBlob = vi.mocked(URL.createObjectURL).mock.calls.map(([blob]) => blob).findLast((blob) => blob instanceof Blob && blob.type === 'application/json') as Blob
+    const project = JSON.parse(await readBlob(jsonBlob)); expect(project.schemaVersion).toBe('step2-1-editor-project-1'); expect(project.editor.annotations).toHaveLength(1); expect(project.editor.viewMode).toBe('editing-preview'); expect(project.originalWebM).toMatchObject({ fileName: 'review.webm', immutableSource: true, embedded: false }); expect(project.originalWebM.blob).toBeUndefined()
+  })
+
+  it('作業JSONと一致する元WebMからTimeline・Annotation・選択状態を復元する', async () => {
+    const project = { schemaVersion: 'step2-1-editor-project-1', savedAt: '2026-01-01T00:00:00.000Z', originalWebM: { fileName: 'review.webm', sizeBytes: 4, mimeType: 'video/webm', durationSeconds: 120, immutableSource: true, embedded: false }, editor: { timelineItems: [{ id: 'timeline-1', contentType: 'video', sourceId: 'video-segment-1', sourceCollection: 'videoSegments', registeredOrder: 1, manualOrder: 1, thumbnailFileName: 'thumb.png', status: 'active', placement: 'timeline' }], points: [], videoSegments: [{ id: 'video-segment-1', order: 1, startSeconds: 2, endSeconds: 5, durationSeconds: 3 }], excludedSegments: [], annotations: [{ id: 'annotation-1', targetTimelineId: 'timeline-1', type: 'rectangle', source: 'user', status: 'accepted', startSeconds: 2, endSeconds: 5, geometry: { x: .2, y: .2, width: .1, height: .1, rotationDegrees: 0 }, style: { strokeColor: '#f00', fillColor: 'transparent', textColor: '#111', strokeWidth: 2, opacity: 1 } }], insertedSlides: [], insertedAssets: [], selectedTimelineId: 'timeline-1', viewMode: 'editing-preview', timelineConfirmedAt: null, fullReviewCompletedAt: null, overlapAcknowledgedAt: null }, media: { pointImages: {}, insertedAssets: {}, timelineThumbnails: {} }, history: { policy: 'resume-from-saved-state', undoEntriesIncluded: false } }
+    render(<App />); const projectFile = new File([JSON.stringify(project)], 'skill-recorder-project.json', { type: 'application/json' }); Object.defineProperty(projectFile, 'text', { value: vi.fn(async () => JSON.stringify(project)) })
+    fireEvent.change(screen.getByLabelText('作業データファイル'), { target: { files: [projectFile] } }); await waitFor(() => expect(screen.getByText(/続けて元WebM/)).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('再開用元WebM'), { target: { files: [new File(['webm'], 'review.webm', { type: 'video/webm' })] } })
+    await waitFor(() => expect(screen.getByText('1. 動画')).toBeInTheDocument()); expect(document.querySelectorAll('.annotation-object')).toHaveLength(1); expect(screen.getByText(/保存時点から作業を再開/)).toBeInTheDocument()
   })
 
   it('タイムラインを横並び専用コンテナに表示し選択項目を明示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); expect(document.querySelector('.timeline-strip')).toBeInTheDocument(); expect(screen.getByText('編集中')).toBeInTheDocument(); expect(screen.getByRole('button', { name: '次の項目 →' })).toBeInTheDocument() })

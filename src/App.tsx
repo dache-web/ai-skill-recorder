@@ -10,12 +10,14 @@ import { formatElapsed, safeRecordingName, supportedMimeType, type RecorderStatu
 import { initialReviewWorkflow, reviewWorkflowReducer, type ResumeAfter } from './reviewWorkflow'
 import AnnotationOverlay, { type OverlayMetrics } from './AnnotationOverlay'
 import { placementGeometry, type PlacementTool } from './annotationInteraction'
+import { blobToDataUrl, dataUrlToBlob, matchesProjectWebM, parseEditorProject, type EditorProject, type ProjectViewMode } from './editorProject'
 
 const stopTracks = (stream: MediaStream | null) => stream?.getTracks().forEach((track) => track.stop())
 const ordered = <T extends { order: number }>(items: T[]): T[] => items.map((item, index) => ({ ...item, order: index + 1 }))
 type RuntimeAsset = { data: InsertedAssetData; blob: Blob; previewUrl: string }
 type EditorSnapshot = { points: ReviewPoint[]; videoSegments: ReviewSegment[]; excludedSegments: ReviewSegment[]; timelineItems: TimelineItem[]; timelineThumbnails: Record<string, { blob: Blob; previewUrl: string }>; annotations: Annotation[]; insertedAssets: RuntimeAsset[]; insertedSlides: InsertedSlide[] }
 type ActiveMedia = { kind: 'video' | 'point' | 'image-slide' | 'generated-slide'; timelineId: string } | null
+const SOURCE_EDITOR_ID = 'source-video-editor'
 
 function App() {
   const [status, setStatus] = useState<RecorderStatus>('idle')
@@ -61,6 +63,8 @@ function App() {
   const [activeMedia, setActiveMedia] = useState<ActiveMedia>(null)
   const [selectionPending, setSelectionPending] = useState(false)
   const [overlayMetrics, setOverlayMetrics] = useState<OverlayMetrics>({ mounted: false, width: 0, height: 0 })
+  const [displaySurfaceReady, setDisplaySurfaceReady] = useState(false)
+  const [viewMode, setViewMode] = useState<ProjectViewMode>('editing-preview')
   const [, setReviewCurrentTime] = useState(0)
   const [mediaAspectRatio, setMediaAspectRatio] = useState(16 / 9)
   const [activePlacementTool, setActivePlacementTool] = useState<PlacementTool | null>(null)
@@ -82,6 +86,10 @@ function App() {
   const timelineCardRefs = useRef<Record<string, HTMLElement | null>>({})
   const mainImageRef = useRef<HTMLImageElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
+  const projectInputRef = useRef<HTMLInputElement>(null)
+  const resumeVideoInputRef = useRef<HTMLInputElement>(null)
+  const pendingProjectRef = useRef<EditorProject | null>(null)
+  const resumeExpectedDurationRef = useRef<number | null>(null)
   const imageInsertModeRef = useRef<'overlay' | 'slide'>('overlay')
   const pastRef = useRef<EditorSnapshot[]>([])
   const futureRef = useRef<EditorSnapshot[]>([])
@@ -107,7 +115,7 @@ function App() {
   useEffect(() => () => { stopTracks(displayStreamRef.current); stopTracks(micStreamRef.current) }, [])
   useEffect(() => () => { if (videoUrl) URL.revokeObjectURL(videoUrl) }, [videoUrl])
   useEffect(() => () => { if (importedUrl) URL.revokeObjectURL(importedUrl) }, [importedUrl])
-  useEffect(() => { setVideoReady(false); setVideoPlaying(false); setVideoDuration(0); playRequestRef.current = null; timelinePlaybackRef.current = null; dispatchReviewWorkflow({ type: 'RESET' }) }, [reviewUrl])
+  useEffect(() => { setVideoReady(false); setDisplaySurfaceReady(false); setVideoPlaying(false); setVideoDuration(0); playRequestRef.current = null; timelinePlaybackRef.current = null; dispatchReviewWorkflow({ type: 'RESET' }) }, [reviewUrl])
   useEffect(() => {
     const strip = timelineStripRef.current; const card = selectedTimelineId ? timelineCardRefs.current[selectedTimelineId] : null
     if (!strip || !card || typeof strip.scrollTo !== 'function') return
@@ -151,8 +159,10 @@ function App() {
     const registeredOrder = ++timelineSequenceRef.current
     const complete = { ...item, registeredOrder, manualOrder: 0 }
     setTimelineItems((current) => [...current, { ...complete, manualOrder: current.length + 1 }])
+    if (!selectedTimelineId) setAnnotations((current) => current.map((annotation) => annotation.targetTimelineId === SOURCE_EDITOR_ID ? { ...annotation, targetTimelineId: item.id } : annotation))
     setSelectedTimelineId(item.id)
     setActiveMedia({ kind: item.contentType === 'video' ? 'video' : item.contentType === 'point' ? 'point' : 'image-slide', timelineId: item.id })
+    setViewMode(item.contentType === 'video' ? 'editing-preview' : item.contentType === 'point' ? 'static-point' : 'inserted-page')
     setSelectionPending(false)
     markTimelineChanged()
   }
@@ -162,7 +172,7 @@ function App() {
     if (pendingSegmentThumbnailRef.current) URL.revokeObjectURL(pendingSegmentThumbnailRef.current.previewUrl)
     pendingSegmentThumbnailRef.current = null
     insertedAssets.forEach((asset) => URL.revokeObjectURL(asset.previewUrl))
-    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setTimelineItems([]); setTimelineThumbnails({}); setAnnotations([]); setInsertedAssets([]); setInsertedSlides([]); setSelectedTimelineId(null); setActiveMedia(null); setSelectionPending(false); setSelectedAnnotationId(null); setEditingTextId(null); setActivePlacementTool(null); setFullReviewActive(false); setFullReviewCompletedAt(null); setTimelineConfirmedAt(null); setOverlapAcknowledgedAt(null); setVideoDuration(0); dispatchReviewWorkflow({ type: 'RESET' }); setReviewMessage(''); setVideoPlaying(false); playRequestRef.current = null
+    setPoints([]); setVideoSegments([]); setExcludedSegments([]); setTimelineItems([]); setTimelineThumbnails({}); setAnnotations([]); setInsertedAssets([]); setInsertedSlides([]); setSelectedTimelineId(null); setActiveMedia(null); setViewMode('editing-preview'); setSelectionPending(false); setSelectedAnnotationId(null); setEditingTextId(null); setActivePlacementTool(null); setFullReviewActive(false); setFullReviewCompletedAt(null); setTimelineConfirmedAt(null); setOverlapAcknowledgedAt(null); setVideoDuration(0); dispatchReviewWorkflow({ type: 'RESET' }); setReviewMessage(''); setVideoPlaying(false); playRequestRef.current = null
     pointSequenceRef.current = 0; videoSegmentSequenceRef.current = 0; excludedSegmentSequenceRef.current = 0
     timelineSequenceRef.current = 0; timelinePlaybackRef.current = null; pastRef.current = []; futureRef.current = []; setHistoryVersion((value) => value + 1); setAnnotationSequence(0); setAssetSequence(0); setSlideSequence(0)
     resetAnalysis()
@@ -362,6 +372,44 @@ function App() {
     insertedAssets: insertedAssets.map((asset) => asset.data),
     insertedSlides,
   })
+  const createEditorProject = async (): Promise<EditorProject> => {
+    const source = selectedAnalysisSource(); if (!source) throw new Error('元WebMを選択してください。')
+    const pointImages = Object.fromEntries(await Promise.all(points.map(async (point) => [point.id, await blobToDataUrl(point.blob)])))
+    const assetImages = Object.fromEntries(await Promise.all(insertedAssets.map(async (asset) => [asset.data.id, await blobToDataUrl(asset.blob)])))
+    const thumbnailImages = Object.fromEntries(await Promise.all(Object.entries(timelineThumbnails).map(async ([id, thumbnail]) => [id, await blobToDataUrl(thumbnail.blob)])))
+    return {
+      schemaVersion: 'step2-1-editor-project-1', savedAt: new Date().toISOString(),
+      originalWebM: { fileName: source.fileName, sizeBytes: source.blob.size, mimeType: source.blob.type || 'video/webm', durationSeconds: videoDuration, immutableSource: true, embedded: false },
+      editor: { timelineItems, points: points.map(pointData), videoSegments, excludedSegments, annotations, insertedSlides, insertedAssets: insertedAssets.map((asset) => asset.data), selectedTimelineId, viewMode, timelineConfirmedAt, fullReviewCompletedAt, overlapAcknowledgedAt },
+      media: { pointImages, insertedAssets: assetImages, timelineThumbnails: thumbnailImages }, history: { policy: 'resume-from-saved-state', undoEntriesIncluded: false },
+    }
+  }
+  const saveEditorProject = async () => {
+    try { const project = await createEditorProject(); downloadBlob(new Blob([`${JSON.stringify(project, null, 2)}\n`], { type: 'application/json' }), 'skill-recorder-project.json'); setReviewMessage('作業データを保存しました。元WebMはJSONへ埋め込まれていません。') }
+    catch (projectError) { setReviewMessage(projectError instanceof Error ? projectError.message : '作業データを保存できませんでした。') }
+  }
+  const chooseEditorProject = async (file: File | null) => {
+    if (!file) return
+    try { pendingProjectRef.current = parseEditorProject(await file.text()); setReviewMessage('作業データを読み込みました。続けて元WebMを選択してください。'); resumeVideoInputRef.current?.click() }
+    catch (projectError) { pendingProjectRef.current = null; setReviewMessage(projectError instanceof Error ? projectError.message : '作業データを読み込めませんでした。') }
+    finally { if (projectInputRef.current) projectInputRef.current.value = '' }
+  }
+  const resumeEditorProject = (file: File | null) => {
+    const project = pendingProjectRef.current
+    if (!project || !file) return
+    if (!matchesProjectWebM(project, file)) { setReviewMessage(`元WebMが作業データと一致しません。\n必要: ${project.originalWebM.fileName} / ${project.originalWebM.sizeBytes} bytes`); return }
+    clearReview(); resumeExpectedDurationRef.current = project.originalWebM.durationSeconds; setImportedFile(file); setImportedUrl(URL.createObjectURL(file))
+    const restoredPoints: ReviewPoint[] = project.editor.points.map((point) => { const blob = dataUrlToBlob(project.media.pointImages[point.id]); return { ...point, blob, previewUrl: URL.createObjectURL(blob) } })
+    const restoredAssets: RuntimeAsset[] = project.editor.insertedAssets.map((data) => { const blob = dataUrlToBlob(project.media.insertedAssets[data.id]); return { data, blob, previewUrl: URL.createObjectURL(blob) } })
+    const restoredThumbnails = Object.fromEntries(Object.entries(project.media.timelineThumbnails).map(([id, dataUrl]) => { const blob = dataUrlToBlob(dataUrl); return [id, { blob, previewUrl: URL.createObjectURL(blob) }] }))
+    setPoints(restoredPoints); setVideoSegments(project.editor.videoSegments); setExcludedSegments(project.editor.excludedSegments); setTimelineItems(project.editor.timelineItems); setTimelineThumbnails(restoredThumbnails); setAnnotations(project.editor.annotations); setInsertedSlides(project.editor.insertedSlides); setInsertedAssets(restoredAssets)
+    setSelectedTimelineId(project.editor.selectedTimelineId); setViewMode(project.editor.viewMode); setTimelineConfirmedAt(project.editor.timelineConfirmedAt); setFullReviewCompletedAt(project.editor.fullReviewCompletedAt); setOverlapAcknowledgedAt(project.editor.overlapAcknowledgedAt)
+    const selected = project.editor.timelineItems.find((item) => item.id === project.editor.selectedTimelineId)
+    const slide = selected?.slideId ? project.editor.insertedSlides.find((candidate) => candidate.id === selected.slideId) : null
+    setActiveMedia(selected ? { kind: selected.contentType === 'video' ? 'video' : selected.contentType === 'point' ? 'point' : slide?.assetId ? 'image-slide' : 'generated-slide', timelineId: selected.id } : { kind: 'video', timelineId: SOURCE_EDITOR_ID })
+    timelineSequenceRef.current = Math.max(0, ...project.editor.timelineItems.map((item) => item.registeredOrder)); pointSequenceRef.current = project.editor.points.length; videoSegmentSequenceRef.current = project.editor.videoSegments.length; excludedSegmentSequenceRef.current = project.editor.excludedSegments.length; setAnnotationSequence(project.editor.annotations.length); setAssetSequence(project.editor.insertedAssets.length); setSlideSequence(project.editor.insertedSlides.length)
+    pastRef.current = []; futureRef.current = []; pendingProjectRef.current = null; setHistoryVersion((value) => value + 1); setReviewMessage('保存時点から作業を再開しました。Undo履歴はこの状態を新しい基準とします。')
+  }
   const prepareAnalysis = async () => {
     const source = selectedAnalysisSource(); if (!source) return
     resetAnalysis(); setAnalysisBusy(true); setAnalysisMessage('ブラウザ内で解析JSONとAI解析用の補助画像を生成しています…')
@@ -379,9 +427,18 @@ function App() {
   const importWebM = (file: File | null) => { setImportedFile(file); setImportedUrl(file ? URL.createObjectURL(file) : ''); clearReview() }
   const updateVideoReady = () => {
     const video = previewRef.current
-    setVideoReady(Boolean(video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && Number.isFinite(video.currentTime)))
+    const ready = Boolean(video && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.videoWidth > 0 && video.videoHeight > 0 && Number.isFinite(video.currentTime))
+    setVideoReady(ready)
+    if (ready) {
+      setDisplaySurfaceReady(true)
+      setActiveMedia((current) => current ?? { kind: 'video', timelineId: selectedTimelineId ?? SOURCE_EDITOR_ID })
+    }
     if (video?.videoWidth && video.videoHeight) setMediaAspectRatio(video.videoWidth / video.videoHeight)
     if (video && Number.isFinite(video.duration) && video.duration > 0) setVideoDuration(normalizeTime(video.duration))
+    if (video && resumeExpectedDurationRef.current !== null && Number.isFinite(video.duration)) {
+      const expected = resumeExpectedDurationRef.current; resumeExpectedDurationRef.current = null
+      if (Math.abs(video.duration - expected) > .25) setReviewMessage(`元WebMの長さが作業データと一致しません（保存時 ${expected.toFixed(2)}秒／選択ファイル ${video.duration.toFixed(2)}秒）。内容を確認してください。`)
+    }
   }
   const observeVideoPlay = () => {
     setVideoPlaying(true)
@@ -408,7 +465,19 @@ function App() {
     const targetTimelineId = timelineId ?? selectedTimelineId
     if (timelineId) setSelectedTimelineId(timelineId)
     if (targetTimelineId) setActiveMedia({ kind: 'video', timelineId: targetTimelineId })
+    setViewMode('editing-preview')
     dispatchReviewWorkflow({ type: 'SEEKED' }); setReviewMessage(`${label}を動画で確認しています。`)
+  }
+
+  const showOriginalVideo = () => {
+    const video = previewRef.current; if (!video) return
+    video.pause(); setVideoPlaying(false); setActivePlacementTool(null); setSelectedAnnotationId(null)
+    setActiveMedia({ kind: 'video', timelineId: selectedTimelineId ?? SOURCE_EDITOR_ID }); setViewMode('original-video'); setReviewMessage('元WebM原本を表示しています。注釈は非表示です。')
+  }
+  const showEditingPreview = () => {
+    const item = selectedTimelineItem
+    if (item) { requestTimelineSelection(item); return }
+    setActiveMedia({ kind: 'video', timelineId: SOURCE_EDITOR_ID }); setViewMode('editing-preview'); setReviewMessage('編集中プレビューを表示しています。')
   }
 
   const timelineItemTime = (item: TimelineItem): number | null => {
@@ -423,14 +492,14 @@ function App() {
     const slide = item.slideId ? insertedSlides.find((candidate) => candidate.id === item.slideId) : null
     if (item.contentType === 'image-slide') {
       previewRef.current?.pause(); setSelectionPending(false)
-      setActiveMedia({ kind: slide?.assetId ? 'image-slide' : 'generated-slide', timelineId: item.id })
+      setActiveMedia({ kind: slide?.assetId ? 'image-slide' : 'generated-slide', timelineId: item.id }); setViewMode('inserted-page')
       setReviewMessage('挿入ページを編集中です。'); return
     }
     const time = timelineItemTime(item); const video = previewRef.current
     if (time === null || !video) { setSelectionPending(false); return }
     video.pause()
     const kind = item.contentType === 'point' ? 'point' : 'video'
-    setActiveMedia({ kind, timelineId: item.id }); setSelectionPending(true)
+    setActiveMedia({ kind, timelineId: item.id }); setViewMode(kind === 'point' ? 'static-point' : 'editing-preview'); setSelectionPending(true)
     const targetTime = normalizeTime(time, Number.isFinite(video.duration) ? video.duration : undefined)
     const label = item.contentType === 'point' ? '★ポイント' : item.status === 'excluded' ? '削除予定' : '動画区間'
     setReviewMessage(`${label}へ移動しています…`)
@@ -454,10 +523,10 @@ function App() {
     const video = previewRef.current; if (!video) return
     setSelectedTimelineId(item.id); setFullReviewActive(true)
     const point = timelinePoint(item, points)
-    if (item.contentType === 'image-slide') { const slide = item.slideId ? insertedSlides.find((candidate) => candidate.id === item.slideId) : null; setActiveMedia({ kind: slide?.assetId ? 'image-slide' : 'generated-slide', timelineId: item.id }); video.pause(); setVideoPlaying(false); timelinePlaybackRef.current = null; setReviewMessage('静止ページを確認中です。確認後「次へ」を押してください。'); return }
-    if (point) { setActiveMedia({ kind: 'point', timelineId: item.id }); video.pause(); video.currentTime = point.timeSeconds; setReviewCurrentTime(point.timeSeconds); setVideoPlaying(false); timelinePlaybackRef.current = null; setReviewMessage('★ポイントを確認中です。確認後「次へ」を押してください。'); return }
+    if (item.contentType === 'image-slide') { const slide = item.slideId ? insertedSlides.find((candidate) => candidate.id === item.slideId) : null; setActiveMedia({ kind: slide?.assetId ? 'image-slide' : 'generated-slide', timelineId: item.id }); setViewMode('inserted-page'); video.pause(); setVideoPlaying(false); timelinePlaybackRef.current = null; setReviewMessage('静止ページを確認中です。確認後「次へ」を押してください。'); return }
+    if (point) { setActiveMedia({ kind: 'point', timelineId: item.id }); setViewMode('static-point'); video.pause(); video.currentTime = point.timeSeconds; setReviewCurrentTime(point.timeSeconds); setVideoPlaying(false); timelinePlaybackRef.current = null; setReviewMessage('★ポイントを確認中です。確認後「次へ」を押してください。'); return }
     const segment = timelineSegment(item, videoSegments, excludedSegments); if (!segment) return
-    setActiveMedia({ kind: 'video', timelineId: item.id })
+    setActiveMedia({ kind: 'video', timelineId: item.id }); setViewMode('editing-preview')
     video.pause(); video.currentTime = segment.startSeconds; setReviewCurrentTime(segment.startSeconds)
     timelinePlaybackRef.current = { itemId: item.id, endSeconds: segment.endSeconds }
     const messageText = item.status === 'excluded' ? '削除予定を確認中です。元WebMからは削除されていません。' : '動画区間を全体確認中です。'
@@ -533,25 +602,25 @@ function App() {
   const selectedSlide = selectedTimelineItem?.slideId ? insertedSlides.find((slide) => slide.id === selectedTimelineItem.slideId) ?? null : null
   const selectedSlideAsset = selectedSlide?.assetId ? insertedAssets.find((asset) => asset.data.id === selectedSlide.assetId) ?? null : null
   const handleOverlayMetrics = useCallback((metrics: OverlayMetrics) => setOverlayMetrics((current) => current.mounted === metrics.mounted && current.width === metrics.width && current.height === metrics.height ? current : metrics), [])
-  const isEditorReady = Boolean(reviewUrl && videoReady && selectedTimelineItem && activeMedia?.timelineId === selectedTimelineItem.id && overlayMetrics.mounted && overlayMetrics.width > 0 && overlayMetrics.height > 0 && !selectionPending)
-  const currentAnnotations = annotations.filter((annotation) => annotation.targetTimelineId === selectedTimelineId && annotation.status === 'accepted')
+  const activeEditorTargetId = selectedTimelineId ?? SOURCE_EDITOR_ID
+  const isEditorReady = Boolean(reviewUrl && videoReady && displaySurfaceReady && activeMedia?.timelineId === activeEditorTargetId && overlayMetrics.mounted && overlayMetrics.width > 0 && overlayMetrics.height > 0 && !selectionPending && viewMode !== 'original-video')
+  const currentAnnotations = viewMode === 'original-video' ? [] : annotations.filter((annotation) => annotation.targetTimelineId === activeEditorTargetId && annotation.status === 'accepted')
 
   const trashTimelineItem = (id: string) => { recordEdit(); setTimelineItems((current) => { const target = current.find((item) => item.id === id); if (!target) return current; const active = current.filter((item) => item.id !== id && (item.placement ?? 'timeline') === 'timeline').map((item, index) => ({ ...item, manualOrder: index + 1 })); const trash = current.filter((item) => item.id !== id && item.placement === 'trash'); return [...active, ...trash, { ...target, placement: 'trash' as const, trashedFromManualOrder: target.manualOrder }] }); if (selectedTimelineId === id) { setSelectedTimelineId(null); setActiveMedia(null) } markTimelineChanged(); setReviewMessage('項目をゴミ箱へ移動しました。元データは削除されていません。') }
   const restoreTimelineItem = (id: string) => { recordEdit(); setTimelineItems((current) => { const target = current.find((item) => item.id === id); if (!target) return current; const active = current.filter((item) => (item.placement ?? 'timeline') === 'timeline'); const insertAt = Math.max(0, Math.min(active.length, (target.trashedFromManualOrder ?? active.length + 1) - 1)); active.splice(insertAt, 0, { ...target, placement: 'timeline' }); const trash = current.filter((item) => item.id !== id && item.placement === 'trash'); return [...active.map((item, index) => ({ ...item, manualOrder: index + 1 })), ...trash] }); markTimelineChanged(); setSelectedTimelineId(id); setReviewMessage('ゴミ箱から元の項目を復元しました。') }
 
   const beginPlacement = (tool: PlacementTool) => {
-    if (!isEditorReady) { setReviewMessage(selectedTimelineItem ? '編集画面を準備しています…' : '編集する項目を下のタイムラインから選択してください。'); return }
+    if (!isEditorReady) { setReviewMessage('編集画面を準備しています…'); return }
     const video = previewRef.current
     video?.pause(); setVideoPlaying(false); timelinePlaybackRef.current = null; setFullReviewActive(false)
-    if (!selectedTimelineItem) { setActivePlacementTool(null); setReviewMessage('先に下のサムネイルから編集する項目を選択してください。動画は停止しました。'); return }
     setSelectedAnnotationId(null); setEditingTextId(null); setActivePlacementTool(tool)
     setReviewMessage(`${tool === 'ellipse' ? '○' : tool === 'rectangle' ? '□' : tool === 'arrow' ? '矢印' : '文字'}を置きたい位置を大画面上でクリックしてください。`)
   }
   const placeAnnotation = (tool: PlacementTool, normalizedX: number, normalizedY: number) => {
-    if (!selectedTimelineItem) { setActivePlacementTool(null); return }
+    if (!activeEditorTargetId) { setActivePlacementTool(null); return }
     const sequence = annotationSequence + 1; setAnnotationSequence(sequence); recordEdit()
     const start = selectedSegment ? selectedSegment.startSeconds : null
-    const annotation: Annotation = { id: `annotation-${sequence}`, targetTimelineId: selectedTimelineItem.id, type: tool, source: 'user', status: 'accepted', startSeconds: start, endSeconds: selectedSegment ? selectedSegment.endSeconds : null, geometry: placementGeometry(tool, normalizedX, normalizedY), style: { strokeColor: '#e13f2b', fillColor: tool === 'rectangle' || tool === 'ellipse' ? 'rgba(255,255,255,0)' : '#e13f2b', textColor: '#172525', strokeWidth: 4, opacity: 1, fontSize: 34 }, text: tool === 'text' ? '' : undefined }
+    const annotation: Annotation = { id: `annotation-${sequence}`, targetTimelineId: activeEditorTargetId, type: tool, source: 'user', status: 'accepted', startSeconds: start, endSeconds: selectedSegment ? selectedSegment.endSeconds : null, geometry: placementGeometry(tool, normalizedX, normalizedY), style: { strokeColor: '#e13f2b', fillColor: tool === 'rectangle' || tool === 'ellipse' ? 'rgba(255,255,255,0)' : '#e13f2b', textColor: '#172525', strokeWidth: 4, opacity: 1, fontSize: 34 }, text: tool === 'text' ? '' : undefined }
     setAnnotations((current) => [...current, annotation]); setSelectedAnnotationId(annotation.id); setEditingTextId(tool === 'text' ? annotation.id : null); setActivePlacementTool(null); markTimelineChanged(); setReviewMessage(tool === 'text' ? '文字を入力し、Enterで確定してください。' : '配置しました。そのまま移動・サイズ変更できます。')
   }
   const updateSelectedAnnotation = (updates: Partial<Annotation>) => { if (!selectedAnnotationId) return; recordEdit(); setAnnotations((current) => current.map((annotation) => annotation.id === selectedAnnotationId ? { ...annotation, ...updates } : annotation)); markTimelineChanged() }
@@ -635,9 +704,15 @@ function App() {
     </article>
   }
   const isBusy = status === 'requesting' || status === 'stopping'
+  const viewModeLabel = viewMode === 'original-video' ? '元動画' : viewMode === 'editing-preview' ? '編集中プレビュー' : viewMode === 'static-point' ? 'ポイント' : selectedSlide?.slideType === 'external-image' ? '挿入画像' : selectedSlide?.slideType === 'title' ? 'タイトル' : selectedSlide?.slideType === 'section' ? '章区切り' : '挿入ページ'
   const videoSourceControls = <div className="video-source-row">
     <div className="video-source-copy"><strong>マニュアルを作成する動画</strong><span>{importedFile?.name || recordingName || '動画が選択されていません'}</span></div>
     <label className="compact-file-field"><span>ファイルを選択</span><input type="file" accept="video/webm,.webm" onChange={(event) => importWebM(event.target.files?.[0] ?? null)} /></label>
+    <button className="project-action" type="button" disabled={!reviewUrl} onClick={() => void saveEditorProject()}>作業を保存</button>
+    <button className="project-action" type="button" onClick={() => projectInputRef.current?.click()}>作業を再開</button>
+    <input ref={projectInputRef} aria-label="作業データファイル" hidden type="file" accept="application/json,.json" onChange={(event) => void chooseEditorProject(event.target.files?.[0] ?? null)} />
+    <input ref={resumeVideoInputRef} aria-label="再開用元WebM" hidden type="file" accept="video/webm,.webm" onChange={(event) => resumeEditorProject(event.target.files?.[0] ?? null)} />
+    {!reviewUrl && reviewMessage && <span className="project-status" aria-live="polite">{reviewMessage}</span>}
     {recordingBlob && !importedFile && <button className="secondary-button compact-save-button" type="button" onClick={saveRecording}>元WebMを保存</button>}
   </div>
 
@@ -654,12 +729,13 @@ function App() {
           <div className="review-stage" hidden={workspaceMode !== 'edit'}>
             {videoSourceControls}
             <div className="media-editor"><div className="media-viewport"><div className="media-content" style={{ aspectRatio: mediaAspectRatio }}>
+              <div className={`view-mode-badge mode-${viewMode}`}>{viewModeLabel}</div><div className="view-mode-switch" aria-label="表示モード"><button type="button" className={viewMode === 'editing-preview' ? 'active' : ''} onClick={showEditingPreview}>編集表示</button><button type="button" className={viewMode === 'original-video' ? 'active' : ''} onClick={showOriginalVideo}>元動画</button></div>
               <video ref={previewRef} className="video-player review-player" style={{ display: activeMedia?.kind === 'video' || !activeMedia ? 'block' : 'none' }} src={reviewUrl} controls playsInline preload="auto" onLoadedMetadata={updateVideoReady} onLoadedData={updateVideoReady} onCanPlay={updateVideoReady} onDurationChange={updateVideoReady} onPlay={observeVideoPlay} onPause={() => setVideoPlaying(false)} onEnded={() => setVideoPlaying(false)} onTimeUpdate={(event) => { setReviewCurrentTime(event.currentTarget.currentTime); handleTimelinePlayback(event.currentTarget) }} onSeeking={() => dispatchReviewWorkflow({ type: 'SEEKED' })} />
               {(activeMedia?.kind === 'point' || activeMedia?.kind === 'image-slide') && (selectedPoint || selectedSlideAsset) && <img ref={mainImageRef} className="main-static-image" src={selectedPoint?.previewUrl ?? selectedSlideAsset?.previewUrl} alt="現在編集中の静止画" onLoad={(event) => { if (event.currentTarget.naturalHeight) setMediaAspectRatio(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight) }} />}
               {activeMedia?.kind === 'generated-slide' && selectedSlide && !selectedSlideAsset && <div className={`main-slide slide-${selectedSlide.slideType}`} style={{ background: selectedSlide.backgroundColor }}><strong>{selectedSlide.title}</strong><span>{selectedSlide.subtitle}</span></div>}
               <AnnotationOverlay annotations={currentAnnotations} assets={insertedAssets} selectedId={selectedAnnotationId} editingTextId={editingTextId} onSelect={(id) => { setSelectedAnnotationId(id); if (id !== editingTextId) setEditingTextId(null) }} onInteractionStart={() => { previewRef.current?.pause(); setVideoPlaying(false); timelinePlaybackRef.current = null; recordEdit() }} onGeometryChange={changeAnnotationGeometry} onInteractionEnd={() => { markTimelineChanged(); setReviewMessage('注釈の位置・大きさを変更しました。') }} onDelete={deleteAnnotation} placementTool={activePlacementTool} onPlace={placeAnnotation} onTextChange={changeAnnotationText} onTextCommit={() => { setEditingTextId(null); markTimelineChanged(); setReviewMessage('文字を入力しました。') }} onMetricsChange={handleOverlayMetrics} />
             </div></div><aside className="annotation-toolbar" aria-label="注釈ツール"><details><summary>図形</summary><div className="shape-menu"><button type="button" disabled={!isEditorReady} onClick={() => beginPlacement('arrow')}>矢印</button><button type="button" disabled={!isEditorReady} onClick={() => beginPlacement('ellipse')}>○</button><button type="button" disabled={!isEditorReady} onClick={() => beginPlacement('rectangle')}>□</button></div></details><button type="button" disabled={!isEditorReady} className={activePlacementTool === 'text' ? 'active-tool' : ''} onClick={() => beginPlacement('text')}>T</button><details><summary>画像</summary><div className="image-menu"><button type="button" disabled={!isEditorReady} onClick={() => beginImageImport('overlay')}>画面に追加</button><button type="button" onClick={() => beginImageImport('slide')}>新規ページに追加</button></div></details><hr /><button type="button" disabled={!isEditorReady} onClick={() => void saveCurrentView()}>画像を保存</button><input ref={imageInputRef} hidden type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => void importImage(event.target.files?.[0] ?? null)} /></aside></div>
-            <p className="editor-readiness" aria-live="polite">{!selectedTimelineItem ? '編集する項目を下のタイムラインから選択してください。' : !isEditorReady ? '編集画面を準備しています…' : '図形・文字・画像を追加できます。'}</p>
+            <p className="editor-readiness" aria-live="polite">{viewMode === 'original-video' ? '元WebM原本を確認中です。編集表示へ戻すと注釈を編集できます。' : !isEditorReady ? '編集画面を準備しています…' : '図形・文字・画像を追加できます。'}</p>
             <div className="review-controls">
               <button className="review-control playback-button" type="button" onClick={togglePlayback} disabled={!videoReady}>{videoPlaying ? '⏸ 一時停止' : pauseReason ? '▶ 再生を続ける' : '▶ 再生する'}</button>
               <button className="review-control point-button" type="button" onClick={addPoint} disabled={!videoReady}>{pauseReason === 'point' ? '▶ ポイント後を再生' : '★ ポイント'}</button>

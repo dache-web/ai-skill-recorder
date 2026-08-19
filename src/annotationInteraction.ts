@@ -2,8 +2,27 @@ import type { Annotation } from './analysis/types'
 
 export type AnnotationGeometry = Annotation['geometry']
 export type ResizeCorner = 'nw' | 'ne' | 'sw' | 'se'
+export type PlacementTool = 'ellipse' | 'rectangle' | 'arrow' | 'text'
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.min(maximum, Math.max(minimum, value))
+
+const INITIAL_SIZES: Record<PlacementTool, { width: number; height: number }> = {
+  ellipse: { width: .12, height: .1 },
+  rectangle: { width: .14, height: .1 },
+  arrow: { width: .18, height: .08 },
+  text: { width: .22, height: .1 },
+}
+
+export const placementGeometry = (tool: PlacementTool, normalizedX: number, normalizedY: number): AnnotationGeometry => {
+  const size = INITIAL_SIZES[tool]
+  return {
+    x: clamp(normalizedX - size.width / 2, 0, 1 - size.width),
+    y: clamp(normalizedY - size.height / 2, 0, 1 - size.height),
+    width: size.width,
+    height: size.height,
+    rotationDegrees: 0,
+  }
+}
 
 export const moveAnnotationGeometry = (geometry: AnnotationGeometry, deltaX: number, deltaY: number): AnnotationGeometry => ({
   ...geometry,

@@ -5,10 +5,16 @@ import App from './App'
 const selectReadyVideo = () => {
   fireEvent.change(screen.getByLabelText('ファイルを選択'), { target: { files: [new File(['webm'], 'review.webm', { type: 'video/webm' })] } })
   const video = document.querySelector('.review-player') as HTMLVideoElement
-  let paused = true
-  Object.defineProperties(video, { readyState: { configurable: true, value: 2 }, videoWidth: { configurable: true, value: 1280 }, videoHeight: { configurable: true, value: 720 }, duration: { configurable: true, value: 120 }, paused: { configurable: true, get: () => paused }, requestVideoFrameCallback: { configurable: true, value: (callback: VideoFrameRequestCallback) => { callback(0, {} as VideoFrameCallbackMetadata); return 1 } } })
+  let paused = true; let currentTime = 0
+  Object.defineProperties(video, { readyState: { configurable: true, value: 2 }, videoWidth: { configurable: true, value: 1280 }, videoHeight: { configurable: true, value: 720 }, duration: { configurable: true, value: 120 }, currentTime: { configurable: true, get: () => currentTime, set: (value: number) => { currentTime = value; queueMicrotask(() => fireEvent.seeked(video)) } }, paused: { configurable: true, get: () => paused }, requestVideoFrameCallback: { configurable: true, value: (callback: VideoFrameRequestCallback) => { callback(0, {} as VideoFrameCallbackMetadata); return 1 } } })
   video.play = vi.fn(async () => { paused = false; fireEvent.play(video) }); video.pause = vi.fn(() => { paused = true; fireEvent.pause(video) })
   fireEvent.loadedMetadata(video); fireEvent.loadedData(video); return video
+}
+const placeText = (clientX = 300, clientY = 150) => {
+  fireEvent.click(screen.getByRole('button', { name: 'T' }))
+  const layer = document.querySelector('.annotation-layer') as HTMLElement
+  Object.defineProperty(layer, 'getBoundingClientRect', { configurable: true, value: vi.fn(() => ({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })) })
+  fireEvent.pointerDown(layer, { pointerId: 1, clientX, clientY })
 }
 const addSegment = async (video: HTMLVideoElement, kind: '動画区間' | '削除予定', start: number, end: number) => {
   video.currentTime = start; fireEvent.click(screen.getByRole('button', { name: `${kind} 開始` })); await waitFor(() => expect(screen.getByRole('button', { name: `${kind} 終了` })).toBeInTheDocument())
@@ -38,7 +44,7 @@ describe('unified review timeline', () => {
 
   it('削除予定解除は同じカードと画像を保つ', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '削除予定', 10, 12); const card = document.querySelector('.timeline-item') as HTMLElement; const image = card.querySelector('img'); expect(card).toHaveClass('is-excluded'); fireEvent.click(screen.getByRole('button', { name: '削除予定解除' })); expect(card).not.toHaveClass('is-excluded'); expect(screen.getByText('1. 動画')).toBeInTheDocument(); expect(card.querySelector('img')).toBe(image) })
 
-  it('並べ替えても元動画時刻を維持する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 4); await addSegment(video, '動画区間', 20, 22); fireEvent.click(screen.getByRole('button', { name: '前へ移動' })); expect(Array.from(document.querySelectorAll('.timeline-time')).map((node) => node.textContent)).toEqual(['00:20 → 00:22', '00:02 → 00:04']); fireEvent.click(screen.getByText('1. 動画')); expect(video.currentTime).toBe(20) })
+  it('並べ替えても元動画時刻を維持する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 4); await addSegment(video, '動画区間', 20, 22); fireEvent.click(screen.getByRole('button', { name: '順番を前へ' })); expect(Array.from(document.querySelectorAll('.timeline-time')).map((node) => node.textContent)).toEqual(['00:20 → 00:22', '00:02 → 00:04']); fireEvent.click(screen.getByText('1. 動画')); expect(video.currentTime).toBe(20) })
 
   it('完成版確認は動画後にポイントで停止する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 1, 3); video.currentTime = 4; fireEvent.click(screen.getByRole('button', { name: '★ ポイント' })); await waitFor(() => expect(screen.getByText('2. ★ポイント')).toBeInTheDocument()); fireEvent.click(screen.getByRole('button', { name: '編集した内容を再生' })); await waitFor(() => expect(video.currentTime).toBe(1)); video.currentTime = 3; fireEvent.timeUpdate(video); await waitFor(() => expect(video.currentTime).toBe(4)); expect(screen.getByText(/★ポイントを確認中/)).toBeInTheDocument() })
 
@@ -46,19 +52,34 @@ describe('unified review timeline', () => {
 
   it('ゴミ箱・復元・Undoで元動画と時刻を維持する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 40, 44); video.currentTime = 44; fireEvent.click(screen.getByRole('button', { name: 'ゴミ箱へ' })); expect(document.querySelectorAll('.timeline-item')).toHaveLength(0); fireEvent.click(screen.getByRole('button', { name: 'ゴミ箱' })); expect(screen.getByRole('button', { name: '元に戻す' })).toBeInTheDocument(); fireEvent.click(screen.getByRole('button', { name: '元に戻す' })); fireEvent.click(screen.getByRole('button', { name: '編集画面へ戻る' })); expect(document.querySelectorAll('.timeline-item')).toHaveLength(1); expect(document.querySelector('.review-player')).toBe(video); expect(video.currentTime).toBe(44) })
 
-  it('注釈追加とUndo/Redoを同じ項目に適用する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByRole('button', { name: 'T' })); expect(document.querySelectorAll('.annotation')).toHaveLength(1); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(document.querySelectorAll('.annotation')).toHaveLength(0); fireEvent.click(screen.getByRole('button', { name: '↷ やり直す' })); expect(document.querySelectorAll('.annotation')).toHaveLength(1) })
+  it('注釈追加とUndo/Redoを同じ項目に適用する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); placeText(); expect(document.querySelectorAll('.annotation')).toHaveLength(1); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect(document.querySelectorAll('.annotation')).toHaveLength(0); fireEvent.click(screen.getByRole('button', { name: '↷ 進む' })); expect(document.querySelectorAll('.annotation')).toHaveLength(1) })
 
-  it('編集ツール選択で動画を止め、直接操作ハンドルを表示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); await video.play(); fireEvent.click(screen.getByRole('button', { name: 'T' })); expect(video.pause).toHaveBeenCalled(); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4); expect(screen.getByRole('button', { name: '選択中の注釈を削除' })).toBeInTheDocument(); expect(screen.queryByText('注意')).not.toBeInTheDocument() })
+  it('編集ツール選択で動画を止め、大画面クリック後にハンドルを表示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); await video.play(); const before = video.currentTime; placeText(); expect(video.pause).toHaveBeenCalled(); expect(video.currentTime).toBe(before); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4); expect(screen.getByRole('button', { name: '選択中の注釈を削除' })).toBeInTheDocument(); expect(screen.queryByText('注意')).not.toBeInTheDocument() })
+
+  it('○・□・矢印を選んだ位置へ配置する', async () => {
+    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('図形'))
+    const layer = document.querySelector('.annotation-layer') as HTMLElement; Object.defineProperty(layer, 'getBoundingClientRect', { configurable: true, value: vi.fn(() => ({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })) })
+    for (const [name, x] of [['○', 200], ['□', 500], ['矢印', 800]] as const) { fireEvent.click(screen.getByRole('button', { name })); fireEvent.pointerDown(layer, { pointerId: 1, clientX: x, clientY: 250 }) }
+    expect(document.querySelectorAll('.annotation-object')).toHaveLength(3); const positions = Array.from(document.querySelectorAll<HTMLElement>('.annotation-object')).map((item) => Number.parseFloat(item.style.left)); expect(positions[0]).toBeCloseTo(14); expect(positions[1]).toBeCloseTo(43); expect(positions[2]).toBeCloseTo(71)
+  })
 
   it('1回の直接ドラッグをUndo 1回で元へ戻す', async () => {
-    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByRole('button', { name: 'T' }))
+    render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); placeText()
+    const textInput = screen.getByRole('textbox', { name: '大画面上の文字入力' }); fireEvent.change(textInput, { target: { value: '操作説明' } }); fireEvent.keyDown(textInput, { key: 'Enter' }); expect(screen.queryByRole('textbox', { name: '大画面上の文字入力' })).not.toBeInTheDocument()
     const layer = document.querySelector('.annotation-layer') as HTMLElement; vi.spyOn(layer, 'getBoundingClientRect').mockReturnValue({ x: 0, y: 0, left: 0, top: 0, right: 1000, bottom: 500, width: 1000, height: 500, toJSON: () => ({}) })
     const annotation = screen.getByRole('button', { name: 'text注釈を選択・移動' }); Object.assign(annotation, { setPointerCapture: vi.fn(), hasPointerCapture: vi.fn(() => false), releasePointerCapture: vi.fn() })
     fireEvent.pointerDown(annotation, { pointerId: 1, clientX: 200, clientY: 100 }); fireEvent.pointerMove(annotation, { pointerId: 1, clientX: 300, clientY: 150 }); fireEvent.pointerUp(annotation, { pointerId: 1, clientX: 300, clientY: 150 })
-    expect(Number.parseFloat((annotation.parentElement as HTMLElement).style.left)).toBeCloseTo(30); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect((annotation.parentElement as HTMLElement).style.left).toBe('20%')
+    expect(Number.parseFloat((annotation.parentElement as HTMLElement).style.left)).toBeCloseTo(29); fireEvent.click(screen.getByRole('button', { name: '↶ 戻す' })); expect((annotation.parentElement as HTMLElement).style.left).toBe('19%')
   })
 
   it('タイムラインを横並び専用コンテナに表示し選択項目を明示する', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); expect(document.querySelector('.timeline-strip')).toBeInTheDocument(); expect(screen.getByText('編集中')).toBeInTheDocument(); expect(screen.getByRole('button', { name: '次の項目 →' })).toBeInTheDocument() })
+
+  it('同じ動画項目へ10件配置しても全件表示し配置を重複させない', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); for (let index = 0; index < 10; index += 1) placeText(100 + index * 70, 80 + index * 25); const objects = Array.from(document.querySelectorAll<HTMLElement>('.annotation-object')); expect(objects).toHaveLength(10); expect(new Set(objects.map((object) => object.style.cssText)).size).toBe(10) })
+
+  it('画像を読み込むと中央へ追加し即選択する', async () => {
+    class LoadedImage { naturalWidth = 800; naturalHeight = 400; onload: null | (() => void) = null; onerror: null | (() => void) = null; set src(_value: string) { queueMicrotask(() => this.onload?.()) } }
+    vi.stubGlobal('Image', LoadedImage); render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 2, 5); fireEvent.click(screen.getByText('画像')); fireEvent.click(screen.getByRole('button', { name: '画面に追加' })); const input = document.querySelector('input[accept="image/png,image/jpeg,image/webp"]') as HTMLInputElement; fireEvent.change(input, { target: { files: [new File(['png'], 'sample.png', { type: 'image/png' })] } }); await waitFor(() => expect(screen.getByAltText('重ね画像')).toBeInTheDocument()); expect(document.querySelector('.annotation-object.selected')).toBeInTheDocument(); expect(screen.getAllByRole('button', { name: /ハンドルでサイズ変更/ })).toHaveLength(4)
+  })
 
   it('現在の動画フレーム保存は再生位置と編集履歴を変えない', async () => { render(<App />); const video = selectReadyVideo(); await addSegment(video, '動画区間', 6, 9); video.currentTime = 7; fireEvent.timeUpdate(video); const undo = screen.getByRole('button', { name: '↶ 戻す' }); const undoEnabledBefore = !undo.hasAttribute('disabled'); fireEvent.click(screen.getByRole('button', { name: '画像を保存' })); await waitFor(() => expect(screen.getByText('現在表示中の完成画面をPNGで保存しました。')).toBeInTheDocument()); expect(video.currentTime).toBe(7); expect(!undo.hasAttribute('disabled')).toBe(undoEnabledBefore) })
 

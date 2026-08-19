@@ -53,7 +53,7 @@ export const timelineSegment = (
 }
 
 export const timelinePoint = (item: TimelineItem, points: ReviewPoint[]): ReviewPoint | null =>
-  item.contentType === 'point' ? points.find((point) => point.id === item.sourceId) ?? null : null
+  item.contentType === 'point' && item.sourceId ? points.find((point) => point.id === item.sourceId) ?? null : null
 
 const round = (value: number) => Number(value.toFixed(3))
 

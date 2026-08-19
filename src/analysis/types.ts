@@ -35,20 +35,43 @@ export interface ReviewSegment {
   durationSeconds: number
 }
 
-export type TimelineContentType = 'video' | 'point'
+export type TimelineContentType = 'video' | 'point' | 'image-slide'
 export type TimelineItemStatus = 'active' | 'excluded'
 export type TimelineSourceCollection = 'points' | 'videoSegments' | 'excludedSegments'
+export type TimelinePlacement = 'timeline' | 'trash'
 
 export interface TimelineItem {
   id: string
   contentType: TimelineContentType
-  sourceId: string
-  sourceCollection: TimelineSourceCollection
+  sourceId?: string
+  sourceCollection?: TimelineSourceCollection
+  slideId?: string
+  origin?: 'recording' | 'inserted'
   registeredOrder: number
   manualOrder: number
   thumbnailFileName: string
   status: TimelineItemStatus
+  placement?: TimelinePlacement
+  trashedFromManualOrder?: number | null
 }
+
+export type AnnotationType = 'arrow' | 'ellipse' | 'rectangle' | 'line' | 'callout' | 'step-number' | 'check' | 'warning' | 'text' | 'image'
+export interface Annotation {
+  id: string
+  targetTimelineId: string
+  type: AnnotationType
+  source: 'user' | 'ai'
+  status: 'proposed' | 'accepted' | 'rejected'
+  startSeconds: number | null
+  endSeconds: number | null
+  geometry: { x: number; y: number; width: number; height: number; rotationDegrees: number }
+  style: { strokeColor: string; fillColor: string; textColor: string; strokeWidth: number; opacity: number; fontSize?: number }
+  text?: string
+  assetId?: string
+}
+
+export interface InsertedAssetData { id: string; fileName: string; mimeType: string; sizeBytes: number; width: number; height: number }
+export interface InsertedSlide { id: string; slideType: 'external-image' | 'title' | 'section' | 'blank'; assetId?: string; title?: string; subtitle?: string; backgroundColor: string }
 
 export interface ManualTimelineItem extends TimelineItem {
   pointSeconds?: number
@@ -71,6 +94,9 @@ export interface ReviewAnnotations {
   videoSegments: ReviewSegment[]
   excludedSegments: Array<ReviewSegment & { treatment: 'exclude-candidate' }>
   manualTimeline: ManualTimeline
+  annotations: Annotation[]
+  insertedAssets: InsertedAssetData[]
+  insertedSlides: InsertedSlide[]
 }
 
 export interface ReviewPoint extends ReviewPointData {
